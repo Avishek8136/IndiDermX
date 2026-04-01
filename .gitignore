@@ -6,4 +6,6 @@ backup/*.jsonl
 backup/*.json
 !.gitkeep
 .env
+.env.*
+!.env.example
 
