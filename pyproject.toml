@@ -22,4 +22,6 @@ build-kg = "hyperderm.scripts.build_kg:main"
 run-infer = "hyperderm.scripts.run_infer:main"
 
 [tool.uv]
-dev-dependencies = []
+dev-dependencies = [
+  "pytest>=8.2.0",
+]
