@@ -5,3 +5,5 @@ __pycache__/
 backup/*.jsonl
 backup/*.json
 !.gitkeep
+.env
+
