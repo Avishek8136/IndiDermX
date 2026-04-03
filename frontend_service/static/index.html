@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IndermaX</title>
+  <style>
+    :root {
+      --bg: #f3f4f6;
+      --panel: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --brand: #10a37f;
+      --brand-2: #0e8f71;
+      --bot: #f9fafb;
+      --user: #e6fffa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Sora", "Segoe UI", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #f8fafc 0%, var(--bg) 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: stretch;
+      justify-content: center;
+      padding: 18px;
+    }
+    .shell {
+      width: min(1040px, 100%);
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 18px;
+      overflow: hidden;
+      box-shadow: 0 16px 40px rgba(2, 8, 23, 0.09);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    .top {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .top-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .top h1 {
+      margin: 0;
+      font-size: 1rem;
+      letter-spacing: 0.01em;
+    }
+    .top p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .brand-mark {
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #0e7490;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .badge {
+      font-size: 0.78rem;
+      color: #065f46;
+      border: 1px solid #a7f3d0;
+      background: #ecfdf5;
+      padding: 6px 10px;
+      border-radius: 999px;
+    }
+    .ghost {
+      border: 1px solid var(--line);
+      background: #ffffff;
+      color: #374151;
+      padding: 8px 12px;
+      font-size: 0.8rem;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    .ghost:hover {
+      background: #f9fafb;
+      box-shadow: none;
+      transform: none;
+    }
+    #log {
+      padding: 18px 18px 20px;
+      height: 64vh;
+      overflow-y: auto;
+      display: grid;
+      gap: 14px;
+      background:
+        radial-gradient(circle at 8% 8%, rgba(14, 165, 233, 0.06) 0%, transparent 30%),
+        radial-gradient(circle at 90% 90%, rgba(16, 163, 127, 0.05) 0%, transparent 28%),
+        #fbfbfc;
+    }
+    .msg {
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      line-height: 1.45;
+      animation: slideIn 180ms ease;
+      white-space: pre-wrap;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+    }
+    .user {
+      background: var(--user);
+      justify-self: end;
+      max-width: 82%;
+      border-color: #b6f0e0;
+    }
+    .bot {
+      background: var(--bot);
+      justify-self: start;
+      max-width: 92%;
+    }
+    .meta {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .explain {
+      margin-top: 10px;
+      border-top: 1px dashed #d1d5db;
+      padding-top: 10px;
+      display: grid;
+      gap: 6px;
+      font-size: 0.86rem;
+      color: #374151;
+    }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .pill {
+      border-radius: 999px;
+      border: 1px solid #d1d5db;
+      padding: 3px 8px;
+      background: #ffffff;
+      font-size: 0.78rem;
+      color: #4b5563;
+    }
+    .bar {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      padding: 14px;
+      border-top: 1px solid var(--line);
+      background: #ffffff;
+      position: sticky;
+      bottom: 0;
+    }
+    .inputs {
+      display: grid;
+      gap: 8px;
+    }
+    .upload-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .status {
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    textarea {
+      width: 100%;
+      resize: vertical;
+      min-height: 64px;
+      max-height: 140px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      padding: 12px;
+      font: inherit;
+      background: #fff;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
+    }
+    textarea:focus,
+    .field:focus {
+      outline: none;
+      border-color: #67e8f9;
+      box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.25);
+    }
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+    }
+    button {
+      border: none;
+      border-radius: 12px;
+      padding: 10px 18px;
+      font: inherit;
+      font-weight: 700;
+      background: linear-gradient(120deg, var(--brand), var(--brand-2));
+      color: #fff;
+      cursor: pointer;
+      transition: transform 130ms ease, box-shadow 130ms ease;
+    }
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 16px rgba(16, 163, 127, 0.26);
+    }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .field {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      padding: 12px;
+      font: inherit;
+      background: #fff;
+    }
+    .questions {
+      margin-top: 8px;
+      display: grid;
+      gap: 6px;
+      color: #374151;
+      font-size: 0.92rem;
+    }
+    .question {
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: #f3f4f6;
+      border: 1px dashed #cbd5e1;
+      cursor: pointer;
+    }
+    .secondary {
+      background: linear-gradient(120deg, #2563eb, #0ea5e9);
+      white-space: nowrap;
+    }
+    @keyframes slideIn {
+      from { transform: translateY(6px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    @media (max-width: 700px) {
+      .shell { border-radius: 14px; }
+      #log { height: 66vh; }
+      .bar { grid-template-columns: 1fr; }
+      button { height: 44px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top">
+      <div>
+        <div class="brand">
+          <span class="brand-mark">IndermaX</span>
+          <h1>(HyperDerm Agentic Diagnosis Chat)</h1>
+        </div>
+      </div>
+      <div class="top-right">
+        <button id="newSessionBtn" class="ghost" type="button">New chat</button>
+        <div class="badge">Assistive, not definitive</div>
+      </div>
+    </div>
+    <div id="log"></div>
+    <div class="bar">
+      <div class="inputs">
+        <textarea id="prompt" placeholder="Describe skin findings, body area, and symptoms..."></textarea>
+        <div class="upload-row">
+          <input id="imageFile" class="field" type="file" accept="image/*" />
+          <button id="uploadBtn" class="secondary" type="button">Upload</button>
+        </div>
+        <input id="imagePath" class="field" type="text" placeholder="Uploaded image path appears here" readonly />
+        <div id="uploadStatus" class="status">No image uploaded.</div>
+      </div>
+      <div class="actions">
+        <button id="send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const log = document.getElementById("log");
+    const promptBox = document.getElementById("prompt");
+    const imageFile = document.getElementById("imageFile");
+    const imagePathBox = document.getElementById("imagePath");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const uploadStatus = document.getElementById("uploadStatus");
+    const sendBtn = document.getElementById("send");
+    const newSessionBtn = document.getElementById("newSessionBtn");
+    let apiBase = "http://127.0.0.1:8000";
+    const sessionKey = "hyperdermSessionId";
+
+    function makeSessionId() {
+      const stamp = Date.now().toString(36);
+      const random = Math.random().toString(36).slice(2, 10);
+      return `sess-${stamp}-${random}`;
+    }
+
+    function getSessionId() {
+      let id = sessionStorage.getItem(sessionKey);
+      if (!id) {
+        id = makeSessionId();
+        sessionStorage.setItem(sessionKey, id);
+      }
+      return id;
+    }
+
+    function resetSession() {
+      const id = makeSessionId();
+      sessionStorage.setItem(sessionKey, id);
+      promptBox.value = "";
+      imagePathBox.value = "";
+      uploadStatus.textContent = "No image uploaded.";
+      log.innerHTML = "";
+      add("bot", "Started a new chat session. Ask a dermatology question with descriptors and location.", `Session: ${id}`);
+    }
+
+    function add(role, text, meta = "") {
+      const el = document.createElement("div");
+      el.className = `msg ${role}`;
+      el.textContent = text;
+      if (meta) {
+        const m = document.createElement("div");
+        m.className = "meta";
+        m.textContent = meta;
+        el.appendChild(m);
+      }
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+      return el;
+    }
+
+    function renderExplainability(parentEl, explainability) {
+      if (!explainability || typeof explainability !== "object") return;
+
+      const box = document.createElement("div");
+      box.className = "explain";
+
+      const hierarchy = Array.isArray(explainability.hierarchy_path) ? explainability.hierarchy_path : [];
+      if (hierarchy.length) {
+        const line = document.createElement("div");
+        line.textContent = `Hierarchy: ${hierarchy.join(" > ")}`;
+        box.appendChild(line);
+      }
+
+      const reasoning = explainability.reasoning || {};
+      const retrieval = reasoning.retrieval || {};
+      const confidence = reasoning.confidence || {};
+
+      const retrievalLine = document.createElement("div");
+      retrievalLine.textContent = `GraphRAG attempted: ${retrieval.graph_rag_attempted ? "yes" : "no"} | Graph context: ${retrieval.graph_rag_context_count || 0} | Evidence: ${retrieval.evidence_count || 0}`;
+      box.appendChild(retrievalLine);
+
+      const confLine = document.createElement("div");
+      confLine.textContent = `Round: ${confidence.conversation_round || 1} | Abstain: ${confidence.should_abstain ? "yes" : "no"} | Reason: ${confidence.reason || "n/a"}`;
+      box.appendChild(confLine);
+
+      const matched = reasoning.matched_inputs || {};
+      const chips = [];
+      (matched.descriptors || []).forEach((v) => chips.push(`descriptor:${v}`));
+      if (matched.body_part) chips.push(`body:${matched.body_part}`);
+      (matched.symptoms || []).forEach((v) => chips.push(`symptom:${v}`));
+      (matched.effects || []).forEach((v) => chips.push(`effect:${v}`));
+
+      if (chips.length) {
+        const row = document.createElement("div");
+        row.className = "pill-row";
+        chips.slice(0, 8).forEach((item) => {
+          const chip = document.createElement("div");
+          chip.className = "pill";
+          chip.textContent = item;
+          row.appendChild(chip);
+        });
+        box.appendChild(row);
+      }
+
+      parentEl.appendChild(box);
+    }
+
+    async function loadConfig() {
+      try {
+        const res = await fetch("/config");
+        const data = await res.json();
+        apiBase = data.apiBaseUrl || apiBase;
+      } catch (_) {}
+    }
+
+    async function uploadImage() {
+      const file = imageFile.files && imageFile.files[0];
+      if (!file) {
+        uploadStatus.textContent = "Select an image first.";
+        return;
+      }
+
+      uploadBtn.disabled = true;
+      uploadStatus.textContent = "Uploading...";
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const res = await fetch(`${apiBase}/upload-image`, {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        imagePathBox.value = data.image_path || "";
+        uploadStatus.textContent = `Uploaded ${data.filename}`;
+        add("bot", `Image uploaded: ${data.filename}`);
+      } catch (err) {
+        uploadStatus.textContent = "Upload failed.";
+        add("bot", "Image upload failed. Check the backend upload endpoint.", String(err));
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    }
+
+    async function ask() {
+      const message = promptBox.value.trim();
+      if (!message) return;
+
+      add("user", message);
+      promptBox.value = "";
+      sendBtn.disabled = true;
+      const pending = add("bot", "Thinking...");
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+        const activeSession = getSessionId();
+        const res = await fetch(`${apiBase}/chat/mcp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, image_path: imagePathBox.value.trim() || null, session_id: activeSession }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.session_id) sessionStorage.setItem(sessionKey, data.session_id);
+
+        const top = data.top_candidate ? `${data.top_candidate.disease} (score ${data.top_candidate.score})` : "No strong match";
+        const meta = `Model: ${data.model} | Fallback: ${data.used_fallback ? "yes" : "no"} | Top: ${top} | Session: ${data.session_id || activeSession}`;
+        pending.remove();
+        const answer = data.answer || "No response";
+        const msgEl = add("bot", answer, meta);
+        renderExplainability(msgEl, data.explainability || {});
+
+        if (Array.isArray(data.suggested_questions) && data.suggested_questions.length) {
+          const q = document.createElement("div");
+          q.className = "msg bot";
+          q.innerHTML = "<strong>Questions to answer next:</strong>";
+          const list = document.createElement("div");
+          list.className = "questions";
+          data.suggested_questions.forEach((item) => {
+            const row = document.createElement("div");
+            row.className = "question";
+            row.textContent = item;
+            row.addEventListener("click", () => {
+              const existing = promptBox.value.trim();
+              promptBox.value = existing ? `${existing} ${item}` : item;
+              promptBox.focus();
+            });
+            list.appendChild(row);
+          });
+          q.appendChild(list);
+          log.appendChild(q);
+          log.scrollTop = log.scrollHeight;
+        }
+      } catch (err) {
+        pending.remove();
+        const msg = err && err.name === "AbortError"
+          ? "Request timed out after 90s. Please retry or use a shorter prompt."
+          : "Request failed. Check backend API or CORS settings.";
+        add("bot", msg, String(err));
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    sendBtn.addEventListener("click", ask);
+    uploadBtn.addEventListener("click", uploadImage);
+    newSessionBtn.addEventListener("click", resetSession);
+    promptBox.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") ask();
+    });
+
+    loadConfig();
+    add("bot", "Ready. Ask a dermatology question with descriptors and location.", `Session: ${getSessionId()}`);
+  </script>
+</body>
+</html>

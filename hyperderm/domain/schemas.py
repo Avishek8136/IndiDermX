@@ -31,6 +31,27 @@ class DiagnoseResponse(BaseModel):
     agent_trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ChatbotRequest(BaseModel):
+    message: str
+    session_id: str | None = None
+    image_path: str | None = None
+
+
+class ChatbotResponse(BaseModel):
+    answer: str
+    session_id: str
+    top_candidate: Candidate | None = None
+    candidate_list: list[Candidate] = Field(default_factory=list)
+    supporting_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    graph_context: list[dict[str, Any]] = Field(default_factory=list)
+    suggested_questions: list[str] = Field(default_factory=list)
+    memory_summary: str = ""
+    explainability: dict[str, Any] = Field(default_factory=dict)
+    used_fallback: bool = False
+    tool_trace: list[dict[str, Any]] = Field(default_factory=list)
+    model: str
+
+
 class DiseaseHierarchyRecord(BaseModel):
     main_class: str
     sub_class: str

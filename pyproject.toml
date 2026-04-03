@@ -14,12 +14,17 @@ dependencies = [
   "httpx>=0.27.0",
   "langgraph>=0.2.14",
   "tqdm>=4.66.0",
-  "bytez>=3.0.1"
+  "bytez>=3.0.1",
+  "python-multipart>=0.0.9"
 ]
 
 [project.scripts]
 build-kg = "hyperderm.scripts.build_kg:main"
 run-infer = "hyperderm.scripts.run_infer:main"
+run-frontend = "frontend_service.app:main"
+run-mcp-stdio = "hyperderm.mcp.run_stdio:main"
+run-mcp-http = "hyperderm.mcp.run_http:main"
+run-stack = "hyperderm.scripts.run_stack:main"
 
 [tool.uv]
 dev-dependencies = [
