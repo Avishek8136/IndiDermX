@@ -58,6 +58,7 @@ def create_container() -> AppContainer:
         local_rag_service=local_rag_service,
         graph_rag_service=graph_rag_service,
         memory_service=memory_service,
+        strict_neo4j_only=settings.strict_neo4j_only,
     )
     chat_mcp_tool = LangGraphMCPTool(
         name="diagnosis_chatbot_tool",

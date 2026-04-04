@@ -9,4 +9,4 @@ backup/*.json
 .env.*
 !.env.example
 uploads/
-
+tests/

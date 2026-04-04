@@ -177,12 +177,23 @@ WITH d, morphNames, bodyNames, symptomNames, collect(DISTINCT toLower(ef.name)) 
 OPTIONAL MATCH (d)-[:ASSOCIATED_WITH_FEATURE]->(:VisualFeaturePrototype)-[:HAS_VISUAL_ATOM]->(va:VisualAtom)
 WITH d, morphNames, bodyNames, symptomNames, effectNames, collect(DISTINCT toLower(va.name)) AS visualAtomNames
 WITH d,
+    [x IN $descriptors WHERE x IN morphNames] AS matchedDescriptors,
+    [x IN $symptoms WHERE x IN symptomNames] AS matchedSymptoms,
+    [x IN $effects WHERE x IN effectNames] AS matchedEffects,
+    [x IN $descriptors WHERE x IN visualAtomNames] AS matchedVisualAtoms,
+    CASE WHEN $body_part <> '' AND $body_part IN bodyNames THEN [$body_part] ELSE [] END AS matchedBodyRegions,
      size([x IN $descriptors WHERE x IN morphNames]) AS descScore,
      CASE WHEN $body_part <> '' AND $body_part IN bodyNames THEN 1 ELSE 0 END AS bodyScore,
      size([x IN $symptoms WHERE x IN symptomNames]) AS symptomScore,
      size([x IN $effects WHERE x IN effectNames]) AS effectScore,
      size([x IN $descriptors WHERE x IN visualAtomNames]) AS visualAtomScore
-WITH d, (descScore + bodyScore + symptomScore + effectScore + visualAtomScore) AS totalScore
+WITH d,
+    matchedDescriptors,
+    matchedBodyRegions,
+    matchedSymptoms,
+    matchedEffects,
+    matchedVisualAtoms,
+    (descScore + bodyScore + symptomScore + effectScore + visualAtomScore) AS totalScore
 ORDER BY totalScore DESC
 LIMIT $limit
 MATCH (sc:SubClass)-[:HAS_DISEASE]->(d)
@@ -192,6 +203,11 @@ RETURN mc.name AS main_class,
        sc.name AS sub_class,
        d.name AS disease,
        totalScore AS score,
+      matchedDescriptors AS matched_descriptors,
+      matchedBodyRegions AS matched_body_regions,
+      matchedSymptoms AS matched_symptoms,
+      matchedEffects AS matched_effects,
+      matchedVisualAtoms AS matched_visual_atoms,
        evidenceRows AS evidence
 """
         with self._driver.session(database=self._database) as session:
@@ -211,6 +227,11 @@ RETURN mc.name AS main_class,
                     "sub_class": row["sub_class"],
                     "disease": row["disease"],
                     "score": float(row["score"] or 0),
+                    "matched_descriptors": row["matched_descriptors"] or [],
+                    "matched_body_regions": row["matched_body_regions"] or [],
+                    "matched_symptoms": row["matched_symptoms"] or [],
+                    "matched_effects": row["matched_effects"] or [],
+                    "matched_visual_atoms": row["matched_visual_atoms"] or [],
                     "evidence": row["evidence"],
                 }
                 for row in result

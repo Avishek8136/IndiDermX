@@ -6,82 +6,77 @@
   <title>HyperDerm Agentic Chat</title>
   <style>
     :root {
-      --bg: #f3f4f6;
+      --bg: #f4f7fb;
       --panel: #ffffff;
-      --text: #111827;
-      --muted: #6b7280;
-      --line: #e5e7eb;
-      --brand: #10a37f;
-      --brand-2: #0e8f71;
-      --bot: #f9fafb;
-      --user: #e6fffa;
+      --surface: #f8fafc;
+      --text: #0f172a;
+      --muted: #64748b;
+      --line: #dbe3ee;
+      --brand: #0f766e;
+      --brand-2: #0369a1;
+      --brand-soft: #e6fffb;
+      --assistant: #ffffff;
+      --user: #e8f1ff;
+      --shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: "Sora", "Segoe UI", sans-serif;
       color: var(--text);
-      background: linear-gradient(180deg, #f8fafc 0%, var(--bg) 100%);
+      background:
+        radial-gradient(circle at 8% 8%, #dbeafe 0%, transparent 36%),
+        radial-gradient(circle at 92% 12%, #ccfbf1 0%, transparent 34%),
+        linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
       min-height: 100vh;
       display: flex;
-      align-items: stretch;
+      align-items: center;
       justify-content: center;
-      padding: 18px;
+      padding: 16px;
     }
     .shell {
-      width: min(1040px, 100%);
-      border: 1px solid var(--line);
+      width: min(1180px, 100%);
+      height: min(92vh, 920px);
+      border: 1px solid #d5dfeb;
       background: var(--panel);
-      border-radius: 18px;
+      border-radius: 20px;
       overflow: hidden;
-      box-shadow: 0 16px 40px rgba(2, 8, 23, 0.09);
+      box-shadow: var(--shadow);
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-columns: 320px 1fr;
     }
-    .top {
-      padding: 16px 20px;
-      border-bottom: 1px solid var(--line);
-      background: #ffffff;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+      display: grid;
+      grid-template-rows: auto auto auto 1fr;
+      gap: 14px;
+      padding: 18px;
     }
-    .top-right {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    .brand {
+      display: grid;
+      gap: 6px;
     }
-    .top h1 {
+    .brand h1 {
       margin: 0;
       font-size: 1rem;
-      letter-spacing: 0.01em;
+      letter-spacing: 0.02em;
     }
-    .top p {
-      margin: 4px 0 0;
+    .brand p {
+      margin: 0;
+      font-size: 0.84rem;
       color: var(--muted);
-      font-size: 0.85rem;
-    }
-    .badge {
-      font-size: 0.78rem;
-      color: #065f46;
-      border: 1px solid #a7f3d0;
-      background: #ecfdf5;
-      padding: 6px 10px;
-      border-radius: 999px;
+      line-height: 1.35;
     }
     .status-banner {
-      margin: 0 18px 14px;
       padding: 10px 12px;
       border-radius: 12px;
       border: 1px solid #f59e0b;
       background: #fffbeb;
       color: #92400e;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      font-size: 0.88rem;
+      display: grid;
+      gap: 2px;
+      font-size: 0.84rem;
     }
     .status-banner.connected {
       border-color: #86efac;
@@ -93,54 +88,108 @@
       background: #fef2f2;
       color: #991b1b;
     }
-    .status-label {
-      font-weight: 700;
+    .status-label { font-weight: 700; }
+    .status-subtle { opacity: 0.8; font-size: 0.78rem; }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
     }
-    .status-subtle {
-      color: inherit;
-      opacity: 0.8;
+    .badge {
+      font-size: 0.76rem;
+      color: #155e75;
+      border: 1px solid #bae6fd;
+      background: #f0f9ff;
+      padding: 6px 10px;
+      border-radius: 999px;
+      width: fit-content;
+    }
+    .main {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%);
+      min-height: 0;
+    }
+    .top {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .top-title {
+      display: grid;
+      gap: 3px;
+    }
+    .top-title h2 {
+      margin: 0;
+      font-size: 0.96rem;
+      letter-spacing: 0.01em;
+    }
+    .top-title p {
+      margin: 0;
+      color: var(--muted);
       font-size: 0.82rem;
     }
     .ghost {
       border: 1px solid var(--line);
       background: #ffffff;
-      color: #374151;
+      color: #334155;
       padding: 8px 12px;
       font-size: 0.8rem;
       border-radius: 10px;
       cursor: pointer;
+      font-weight: 600;
     }
     .ghost:hover {
-      background: #f9fafb;
+      background: #f8fafc;
       box-shadow: none;
       transform: none;
     }
     #log {
-      padding: 18px 18px 20px;
-      height: 64vh;
+      padding: 20px;
       overflow-y: auto;
       display: grid;
-      gap: 14px;
-      background: #fbfbfc;
+      gap: 12px;
+      background: transparent;
+      min-height: 0;
     }
     .msg {
       padding: 12px 14px;
-      border-radius: 14px;
+      border-radius: 15px;
       border: 1px solid var(--line);
       line-height: 1.45;
       animation: slideIn 180ms ease;
       white-space: pre-wrap;
+      box-shadow: 0 6px 14px rgba(15, 23, 42, 0.05);
+    }
+    .msg h4 {
+      margin: 10px 0 4px;
+      font-size: 0.86rem;
+      color: #0f766e;
+      letter-spacing: 0.01em;
+    }
+    .msg h4:first-child {
+      margin-top: 0;
+    }
+    .msg p {
+      margin: 0;
+      line-height: 1.48;
     }
     .user {
       background: var(--user);
       justify-self: end;
-      max-width: 82%;
-      border-color: #b6f0e0;
+      max-width: 78%;
+      border-color: #c7d9ff;
     }
     .bot {
-      background: var(--bot);
+      background: var(--assistant);
       justify-self: start;
-      max-width: 92%;
+      max-width: 86%;
     }
     .meta {
       font-size: 0.8rem;
@@ -174,7 +223,7 @@
       display: grid;
       grid-template-columns: 1fr;
       gap: 10px;
-      padding: 14px;
+      padding: 14px 18px 16px;
       border-top: 1px solid var(--line);
       background: #ffffff;
     }
@@ -195,7 +244,7 @@
     textarea {
       width: 100%;
       resize: vertical;
-      min-height: 64px;
+      min-height: 62px;
       max-height: 140px;
       border-radius: 12px;
       border: 1px solid var(--line);
@@ -205,7 +254,13 @@
     }
     .actions {
       display: flex;
-      justify-content: flex-end;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 0.78rem;
     }
     button {
       border: none;
@@ -246,7 +301,7 @@
       cursor: pointer;
     }
     .secondary {
-      background: linear-gradient(120deg, #2563eb, #0ea5e9);
+      background: linear-gradient(120deg, #2563eb, #0284c7);
       white-space: nowrap;
     }
     @keyframes slideIn {
@@ -254,47 +309,63 @@
       to { transform: translateY(0); opacity: 1; }
     }
     @media (max-width: 700px) {
-      .shell { border-radius: 14px; }
-      #log { height: 66vh; }
-      .bar { grid-template-columns: 1fr; }
+      body { padding: 10px; }
+      .shell {
+        border-radius: 14px;
+        height: 96vh;
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+        grid-template-rows: auto auto auto;
+      }
       button { height: 44px; }
     }
   </style>
 </head>
 <body>
   <div class="shell">
-    <div class="top">
-      <div>
-        <h1>HyperDerm Agentic Diagnosis Chat</h1>
-        <p>LangGraph + Neo4j + GraphRAG + backup fallback + MedGemma</p>
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>HyperDerm Doctor Agent</h1>
+        <p>Clinical-style conversational diagnosis support powered by Neo4j and MedGemma.</p>
       </div>
-      <div class="top-right">
-        <button id="newSessionBtn" class="ghost" type="button">New chat</button>
-        <div class="badge">Assistive, not definitive</div>
-      </div>
-    </div>
-    <div id="statusBanner" class="status-banner">
-      <div>
-        <span class="status-label">Backend status:</span>
-        <span id="statusText">Checking connectivity...</span>
-      </div>
-      <div id="statusDetail" class="status-subtle">API health not checked yet</div>
-    </div>
-    <div id="log"></div>
-    <div class="bar">
-      <div class="inputs">
-        <textarea id="prompt" placeholder="Describe skin findings, body area, and symptoms..."></textarea>
-        <div class="upload-row">
-          <input id="imageFile" class="field" type="file" accept="image/*" />
-          <button id="uploadBtn" class="secondary" type="button">Upload</button>
+      <div id="statusBanner" class="status-banner">
+        <div>
+          <span class="status-label">Backend status:</span>
+          <span id="statusText">Checking connectivity...</span>
         </div>
-        <input id="imagePath" class="field" type="text" placeholder="Uploaded image path appears here" readonly />
+        <div id="statusDetail" class="status-subtle">API health not checked yet</div>
+      </div>
+      <div class="panel">
+        <div class="badge">Strict Neo4j + MedGemma mode</div>
+        <button id="newSessionBtn" class="ghost" type="button">New conversation</button>
+        <input id="imageFile" class="field" type="file" accept="image/*" />
+        <button id="uploadBtn" class="secondary" type="button">Upload image</button>
+        <input id="imagePath" class="field" type="text" placeholder="Uploaded image path" readonly />
         <div id="uploadStatus" class="status">No image uploaded.</div>
       </div>
-      <div class="actions">
-        <button id="send">Send</button>
+    </aside>
+    <main class="main">
+      <div class="top">
+        <div class="top-title">
+          <h2>HyperDerm Agentic Diagnosis Chat</h2>
+          <p>Doctor-patient conversational workflow with explainability</p>
+        </div>
+        <div class="badge">Assistive, not definitive</div>
       </div>
-    </div>
+      <div id="log"></div>
+      <div class="bar">
+        <div class="inputs">
+          <textarea id="prompt" placeholder="Describe skin findings, location, symptoms, and timeline..."></textarea>
+        </div>
+        <div class="actions">
+          <div class="hint">Ctrl/Cmd + Enter to send</div>
+          <button id="send">Send message</button>
+        </div>
+      </div>
+    </main>
   </div>
 
   <script>
@@ -341,6 +412,50 @@
       const el = document.createElement("div");
       el.className = `msg ${role}`;
       el.textContent = text;
+      if (meta) {
+        const m = document.createElement("div");
+        m.className = "meta";
+        m.textContent = meta;
+        el.appendChild(m);
+      }
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+      return el;
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function formatDoctorReport(text) {
+      const raw = String(text || "").trim();
+      const sectionRegex = /(Probable condition:|Why this matches:|Graph evidence used:|Clinical caution:)/gi;
+      const chunks = raw.split(sectionRegex).filter(Boolean);
+
+      if (chunks.length < 3) {
+        return `<p>${escapeHtml(raw).replace(/\n/g, "<br>")}</p>`;
+      }
+
+      let html = "";
+      for (let i = 0; i < chunks.length; i += 2) {
+        const label = (chunks[i] || "").trim();
+        const body = (chunks[i + 1] || "").trim();
+        if (!label) continue;
+        html += `<h4>${escapeHtml(label.replace(/:$/, ""))}</h4>`;
+        html += `<p>${escapeHtml(body).replace(/\n/g, "<br>")}</p>`;
+      }
+      return html || `<p>${escapeHtml(raw).replace(/\n/g, "<br>")}</p>`;
+    }
+
+    function addAssistantReport(text, meta = "") {
+      const el = document.createElement("div");
+      el.className = "msg bot";
+      el.innerHTML = formatDoctorReport(text);
       if (meta) {
         const m = document.createElement("div");
         m.className = "meta";
@@ -485,7 +600,7 @@
         const meta = `Model: ${data.model} | Fallback: ${data.used_fallback ? "yes" : "no"} | Top: ${top} | Session: ${data.session_id || activeSession}`;
         pending.remove();
         const answer = data.answer || "No response";
-        const msgEl = add("bot", answer, meta);
+        const msgEl = addAssistantReport(answer, meta);
         renderExplainability(msgEl, data.explainability || {});
 
         if (Array.isArray(data.suggested_questions) && data.suggested_questions.length) {

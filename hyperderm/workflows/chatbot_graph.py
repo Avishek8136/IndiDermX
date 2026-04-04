@@ -51,6 +51,7 @@ def build_chatbot_workflow(
     local_rag_service: LocalRagService,
     graph_rag_service: GraphRagService,
     memory_service: ConversationMemoryService,
+    strict_neo4j_only: bool = False,
 ):
     def _safe_memory_load_recent(session_id: str, limit: int = 12) -> list[dict[str, Any]]:
         loader = getattr(memory_service, "load_recent", None)
@@ -218,6 +219,8 @@ def build_chatbot_workflow(
 
     def _route_after_neo4j(state: ChatbotState) -> str:
         candidates = state.get("neo4j_candidates", [])
+        if strict_neo4j_only and not candidates:
+            return "continue"
         return "use_fallback" if not candidates else "continue"
 
     def node_diagnose_fallback(state: ChatbotState) -> ChatbotState:
@@ -250,7 +253,14 @@ def build_chatbot_workflow(
         if candidates:
             graph_rag_attempted = True
             try:
-                graph_context = graph_rag_service.retrieve_context(str(candidates[0].get("disease", "")).strip(), limit=5)
+                seen_diseases: set[str] = set()
+                for candidate in candidates[:5]:
+                    disease_name = str(candidate.get("disease", "")).strip()
+                    if not disease_name or disease_name in seen_diseases:
+                        continue
+                    seen_diseases.add(disease_name)
+                    rows = graph_rag_service.retrieve_context(disease_name, limit=3)
+                    graph_context.extend(rows)
             except Exception as error:
                 graph_context = []
                 graph_rag_error = f"graph_rag_unavailable:{type(error).__name__}"
@@ -267,6 +277,7 @@ def build_chatbot_workflow(
                     "candidate_count": len(candidates),
                     "graph_rag_attempted": graph_rag_attempted,
                     "graph_rag_context_count": len(graph_context),
+                    "graph_rag_diseases": [str(row.get("disease", "")) for row in graph_context[:5]],
                     "graph_rag_error": graph_rag_error,
                 },
             ),
@@ -275,21 +286,29 @@ def build_chatbot_workflow(
     def node_retrieve_evidence(state: ChatbotState) -> ChatbotState:
         selected = state.get("selected_candidates", [])
         top_disease = str(selected[0].get("disease", "")).strip() if selected else ""
-        query_terms = [
-            *state.get("descriptors", []),
-            *state.get("symptoms", []),
-            *state.get("effects", []),
-            state.get("body_part", ""),
-        ]
-        evidence = local_rag_service.retrieve(query_terms=query_terms, disease_hint=top_disease or None, limit=5)
-
-        if selected:
-            merged = list(selected[0].get("evidence", []))
-            merged.extend(evidence)
-            for context_row in state.get("graph_context", []):
-                merged.extend(context_row.get("evidence", []))
+        if strict_neo4j_only:
+            if selected:
+                merged = list(selected[0].get("evidence", []))
+                for context_row in state.get("graph_context", []):
+                    merged.extend(context_row.get("evidence", []))
+            else:
+                merged = []
         else:
-            merged = evidence
+            query_terms = [
+                *state.get("descriptors", []),
+                *state.get("symptoms", []),
+                *state.get("effects", []),
+                state.get("body_part", ""),
+            ]
+            evidence = local_rag_service.retrieve(query_terms=query_terms, disease_hint=top_disease or None, limit=5)
+
+            if selected:
+                merged = list(selected[0].get("evidence", []))
+                merged.extend(evidence)
+                for context_row in state.get("graph_context", []):
+                    merged.extend(context_row.get("evidence", []))
+            else:
+                merged = evidence
 
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -311,9 +330,10 @@ def build_chatbot_workflow(
             "tool_trace": _append_trace(
                 state,
                 {
-                    "step": "local_backup_evidence_tool",
+                    "step": "neo4j_evidence_tool" if strict_neo4j_only else "local_backup_evidence_tool",
                     "agent": "rag_evidence_agent",
                     "evidence_count": len(deduped[:6]),
+                    "strict_neo4j_only": strict_neo4j_only,
                 },
             ),
         }
@@ -340,13 +360,13 @@ def build_chatbot_workflow(
         questions: list[str] = []
 
         if not body_part:
-            questions.append("Which body area is most affected?")
+            questions.append("As your dermatologist, can you tell me which body area is most affected?")
         if not state.get("descriptors"):
-            questions.append("What does the rash or lesion look like: flat, scaly, raised, ring-shaped, or patchy?")
+            questions.append("As your doctor, how does the lesion look: flat, scaly, raised, ring-shaped, or patchy?")
         if not state.get("symptoms"):
-            questions.append("Is it itchy, painful, burning, or neither?")
+            questions.append("Are you feeling itch, pain, burning, or none of these symptoms?")
         if not state.get("effects"):
-            questions.append("Has it been spreading, cracking, oozing, or leaving scars?")
+            questions.append("Has it spread, cracked, oozed, or left scars over time?")
 
         if "acne" in candidate_name:
             questions.extend([
@@ -393,13 +413,25 @@ def build_chatbot_workflow(
         top = selected[0] if selected else {}
         top_score = float(top.get("score", 0.0)) if top else 0.0
         evidence_count = len(state.get("supporting_evidence", []))
+        conversation_round = int(state.get("conversation_round", 1) or 1)
 
         has_signal = bool(state.get("descriptors") or state.get("symptoms") or state.get("body_part"))
         force_diagnosis = bool(state.get("force_diagnosis", False))
+        user_message = str(state.get("user_message", "")).strip().lower()
 
         if force_diagnosis and selected and has_signal and top_score > 0.0:
             should_abstain = False
             reason = "forced_diagnosis_after_round_limit"
+        elif strict_neo4j_only and (not selected) and has_signal and conversation_round >= 2:
+            # In strict graph mode, allow MedGemma to provide model-only differential reasoning
+            # after enough conversational signal, even when graph has no candidate match.
+            should_abstain = False
+            reason = "medgemma_direct_inference_no_graph_match"
+        elif conversation_round == 1 and not selected and len(user_message) <= 10:
+            # On round 1 with NO candidates and very minimal user input (e.g., "Hi", "Hello"),
+            # engage with probing questions instead of immediately abstaining.
+            should_abstain = False
+            reason = "round_1_intake_engagement"
         else:
             should_abstain = (not selected) or (top_score <= 0.0) or (not has_signal) or (top_score < 3.0 and evidence_count == 0)
             reason = "low_confidence_or_no_signal" if should_abstain else "sufficient_signal"
@@ -416,6 +448,8 @@ def build_chatbot_workflow(
                     "evidence_count": evidence_count,
                     "should_abstain": should_abstain,
                     "force_diagnosis": force_diagnosis,
+                    "conversation_round": conversation_round,
+                    "strict_neo4j_only": strict_neo4j_only,
                 },
             ),
         }
@@ -425,9 +459,9 @@ def build_chatbot_workflow(
 
     def node_abstain_answer(state: ChatbotState) -> ChatbotState:
         message = (
-            "I do not have enough reliable evidence to suggest a specific condition from this description. "
-            "Please provide more details such as lesion shape, duration, distribution, and clear symptoms, "
-            "or consult a dermatologist for an in-person exam."
+            "I do not yet have enough reliable evidence to provide a specific diagnosis. "
+            "As your dermatologist assistant, I need a few more clinical details such as lesion shape, duration, distribution, and symptoms. "
+            "If symptoms worsen, please consult a dermatologist for an in-person exam."
         )
         return {
             "draft_answer": message,
@@ -444,16 +478,27 @@ def build_chatbot_workflow(
     def node_generate_answer(state: ChatbotState) -> ChatbotState:
         selected = state.get("selected_candidates", [])
         top_candidate = selected[0] if selected else None
-        answer = medgemma_service.generate_chat_answer(
-            user_message=state.get("user_message", ""),
-            top_candidate=top_candidate,
-            candidates=selected,
-            evidence=state.get("supporting_evidence", []),
-            visual_features=state.get("visual_features", {}),
-            graph_context=state.get("graph_context", []),
-            memory_summary=state.get("memory_summary", ""),
-            suggested_questions=state.get("suggested_questions", []),
-        )
+        abstain_reason = state.get("abstain_reason", "")
+        
+        # On round 1 intake engagement, generate a simple welcome message
+        # The questions will be presented separately via suggested_questions UI element
+        if abstain_reason == "round_1_intake_engagement":
+            answer = (
+                "Hello! I'm your dermatology assistant. "
+                "To help me understand your skin concern better, I have a few clinical questions to guide us through a proper assessment. "
+                "Please answer the questions below to get started."
+            )
+        else:
+            answer = medgemma_service.generate_chat_answer(
+                user_message=state.get("user_message", ""),
+                top_candidate=top_candidate,
+                candidates=selected,
+                evidence=state.get("supporting_evidence", []),
+                visual_features=state.get("visual_features", {}),
+                graph_context=state.get("graph_context", []),
+                memory_summary=state.get("memory_summary", ""),
+                suggested_questions=state.get("suggested_questions", []),
+            )
 
         return {
             "draft_answer": answer,
@@ -503,9 +548,22 @@ def build_chatbot_workflow(
                 "retrieval": {
                     "graph_rag_attempted": bool(state.get("graph_rag_attempted", False)),
                     "graph_rag_context_count": len(state.get("graph_context", [])),
+                    "graph_rag_diseases": [str(row.get("disease", "")) for row in state.get("graph_context", [])[:5]],
                     "evidence_count": len(state.get("supporting_evidence", [])),
                     "used_fallback": bool(state.get("used_fallback", False)),
                 },
+                "neo4j_candidate_matches": [
+                    {
+                        "disease": item.get("disease", ""),
+                        "score": float(item.get("score", 0.0)),
+                        "matched_descriptors": item.get("matched_descriptors", []),
+                        "matched_body_regions": item.get("matched_body_regions", []),
+                        "matched_symptoms": item.get("matched_symptoms", []),
+                        "matched_effects": item.get("matched_effects", []),
+                        "matched_visual_atoms": item.get("matched_visual_atoms", []),
+                    }
+                    for item in selected[:5]
+                ],
             },
             "follow_up_questions": state.get("suggested_questions", []),
         }

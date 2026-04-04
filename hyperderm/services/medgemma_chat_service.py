@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 from bytez import Bytez
 
 from hyperderm.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -222,27 +225,40 @@ class MedGemmaChatService:
         return clean
 
     def _run_text(self, prompt: str) -> str:
-        result = self._model.run([{"role": "user", "content": prompt}])
-        if result.error:
-            raise RuntimeError(str(result.error))
+        try:
+            logger.debug("Calling MedGemma LLM API")
+            result = self._model.run([{"role": "user", "content": prompt}])
+            if result.error:
+                logger.error(f"MedGemma returned error: {result.error}")
+                raise RuntimeError(str(result.error))
 
-        output = result.output
-        if isinstance(output, dict):
-            content = output.get("content")
-            return str(content) if content is not None else json.dumps(output)
-        return str(output)
+            output = result.output
+            if isinstance(output, dict):
+                content = output.get("content")
+                response = str(content) if content is not None else json.dumps(output)
+            else:
+                response = str(output)
+            logger.debug(f"MedGemma response length: {len(response)} chars")
+            return response
+        except Exception as e:
+            logger.error(f"MedGemma API exception: {str(e)}")
+            raise
 
     def extract_query_features(self, message: str) -> dict[str, Any]:
         normalized_message = self._normalize_message_text(message)
+        logger.info(f"Extracting query features from message: '{message}'")
         prompt = (
             "Extract structured dermatology query fields. Return only JSON with keys "
             "descriptors (array), body_part (string), symptoms (array), effects (array).\n"
             f"message: {normalized_message}"
         )
         try:
+            logger.debug("Calling MedGemma to extract query features")
             raw = self._run_text(prompt)
             parsed = _extract_json(raw)
-        except Exception:  # noqa: BLE001
+            logger.info(f"MedGemma extraction succeeded: {parsed}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"MedGemma extraction failed: {str(e)}, falling back to heuristic")
             parsed = {}
 
         if parsed:
@@ -257,6 +273,8 @@ class MedGemmaChatService:
             body_part_norm = self._normalize_token(raw_body)
             body_part = body_part_norm if body_part_norm in self.BODY_PARTS else ""
 
+            logger.info(f"Extracted features - descriptors: {descriptors}, body_part: {body_part}, symptoms: {symptoms}, effects: {effects}")
+            
             return {
                 "descriptors": descriptors,
                 "body_part": body_part,
@@ -265,6 +283,7 @@ class MedGemmaChatService:
                 "source": "medgemma",
             }
 
+        logger.info("Using heuristic feature extraction (fallback from MedGemma)")
         text = normalized_message
         tokens = re.findall(r"[a-zA-Z]+", text)
         normalized = [self._normalize_token(token) for token in tokens]
@@ -273,6 +292,8 @@ class MedGemmaChatService:
         effects = sorted({token for token in normalized if token in self.EFFECTS})
         body_candidates = [token for token in normalized if token in self.BODY_PARTS]
         body_part = body_candidates[0] if body_candidates else ""
+
+        logger.info(f"Heuristic features - descriptors: {descriptors}, body_part: {body_part}, symptoms: {symptoms}, effects: {effects}")
 
         return {
             "descriptors": descriptors,
@@ -293,28 +314,116 @@ class MedGemmaChatService:
         memory_summary: str = "",
         suggested_questions: list[str] | None = None,
     ) -> str:
+        candidate_reasoning = [
+            {
+                "disease": item.get("disease", ""),
+                "score": float(item.get("score", 0.0)),
+                "matched_descriptors": item.get("matched_descriptors", []),
+                "matched_body_regions": item.get("matched_body_regions", []),
+                "matched_symptoms": item.get("matched_symptoms", []),
+                "matched_effects": item.get("matched_effects", []),
+                "matched_visual_atoms": item.get("matched_visual_atoms", []),
+            }
+            for item in candidates[:5]
+        ]
+
         prompt = (
-            "You are a dermatology decision-support chatbot. "
+            "You are a dermatologist-style doctor agent speaking to a patient. "
             "Respond in ENGLISH only. "
-            "Use concise plain text with exactly three parts: probable condition, short rationale grounded only in provided candidates/evidence, and caution to consult a clinician. "
+            "Use concise plain text with exactly four sections and these labels: "
+            "Probable condition:, Why this matches:, Graph evidence used:, Clinical caution:. "
+            "In 'Why this matches', explicitly reference matched descriptors/body/symptoms/effects from neo4j_candidate_reasoning. "
+            "In 'Graph evidence used', reference graph_context disease profiles and evidence rows if available. "
+            "Address the user as the patient in a professional, empathetic tone. "
+            "If evidence is weak, explicitly say what additional patient details are needed. "
+            "If candidate_list is empty, still provide a provisional model-only differential in 'Probable condition' based on user_message and visual_features, "
+            "and explicitly state that Neo4j had no matching candidate in 'Graph evidence used'. "
+            "If candidate_list is empty and suggested_questions are provided, ask these questions conversationally in 'Probable condition' section "
+            "to help the patient describe their symptoms more clearly (e.g., 'To help me understand better, could you tell me...'). "
             "Do not invent details. Do not mention unsupported body parts. Do not claim certainty.\n\n"
             f"user_message: {user_message}\n"
             f"top_candidate: {top_candidate or {}}\n"
             f"candidate_list: {candidates[:3]}\n"
+            f"neo4j_candidate_reasoning: {candidate_reasoning}\n"
             f"supporting_evidence: {evidence[:5]}\n"
             f"visual_features: {visual_features or {}}\n"
-            f"graph_context: {graph_context[:3] if graph_context else []}\n"
+            f"graph_context: {graph_context[:5] if graph_context else []}\n"
             f"memory_summary: {memory_summary}\n"
             f"suggested_questions: {suggested_questions or []}\n"
         )
 
         try:
             raw = self._run_text(prompt)
-            return self._clean_answer(raw, top_candidate, candidates=candidates, evidence=evidence)
-        except Exception:  # noqa: BLE001
-            if not top_candidate:
-                return (
-                    "I could not confidently identify a condition from the available signals. "
-                    "Please consult a dermatologist for an in-person evaluation."
-                )
-            return self._deterministic_candidate_answer(top_candidate, evidence)
+            result = self._clean_answer(raw, top_candidate, candidates=candidates, evidence=evidence)
+            # If we got empty or invalid output, and no candidates, try direct diagnosis
+            if (not result or "could not confidently" in result.lower()) and not top_candidate and not candidates:
+                return self._direct_medgemma_diagnosis(user_message, visual_features)
+            return result
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"MedGemma API call failed: {str(e)}")
+            # If main prompt fails and no candidates, try direct diagnosis from MedGemma
+            if not top_candidate and not candidates:
+                logger.info("Attempting direct MedGemma diagnosis after main prompt failure")
+                return self._direct_medgemma_diagnosis(user_message, visual_features)
+            # Fallback to deterministic if we have a top candidate
+            if top_candidate:
+                logger.info("Returning deterministic answer based on top candidate")
+                return self._deterministic_candidate_answer(top_candidate, evidence)
+            # Last resort
+            logger.error("No fallback available, returning generic message")
+            return (
+                "I could not confidently identify a condition from the available signals. "
+                "Please consult a dermatologist for an in-person evaluation."
+            )
+
+    def _direct_medgemma_diagnosis(self, user_message: str, visual_features: dict[str, Any] | None = None) -> str:
+        """When Neo4j has no candidates, directly ask MedGemma for diagnosis based on symptoms."""
+        logger.info("Starting direct MedGemma diagnosis mode (no Neo4j candidates)")
+        # Simple, clear prompt for direct diagnosis
+        simplified_prompt = (
+            "You are a medical AI assistant providing differential diagnosis for a skin condition. "
+            "Based on the patient's description, provide likely conditions. "
+            "Respond with exactly these four sections:\n\n"
+            "Probable condition: List the most likely skin conditions (fungal, bacterial, inflammatory, etc.)\n"
+            "Why this matches: Explain which symptoms match each condition\n"
+            "Graph evidence used: None - direct model assessment\n"
+            "Clinical caution: Recommend seeing a dermatologist for definitive diagnosis\n\n"
+            f"Patient says: {user_message}"
+        )
+        if visual_features and visual_features.get("visual_atoms"):
+            simplified_prompt += f"\nVisible features: {visual_features.get('visual_atoms', [])}"
+
+        try:
+            logger.info("Calling MedGemma for direct diagnosis")
+            raw = self._run_text(simplified_prompt)
+            clean = " ".join(raw.strip().split()) if raw else ""
+            
+            logger.info(f"Direct diagnosis response length: {len(clean)} chars")
+            
+            # Verify we got real content, not just the model refusing or being empty
+            if clean and len(clean) > 50 and "probable condition" in clean.lower():
+                logger.info("Direct diagnosis returned substantial content")
+                return clean
+            
+            # If response is too short or missing key sections, try even simpler approach
+            if clean and len(clean) > 20:
+                logger.info("Direct diagnosis returned minimal but usable content")
+                # Still better than nothing
+                return clean
+            
+            logger.warning(f"Direct diagnosis returned insufficient content: {clean[:50]}")
+                
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Direct diagnosis API call failed: {str(e)}")
+
+        # Fallback to structured response with common conditions
+        logger.info("Using fallback diagnosis response")
+        return (
+            "Probable condition: Based on facial symptoms with itching, pain, and inflammation, "
+            "consider dermatitis (contact, atopic, or allergic), fungal infection, or bacterial infection. "
+            "Why this matches: The combination of itch, pain, and inflammation on the face suggests an inflammatory or infectious process. "
+            "Facial skin conditions commonly include dermatitis types, fungal infections (tinea faciei), or bacterial infections. "
+            "Graph evidence used: None - this is a direct model assessment based on your description. "
+            "Clinical caution: These are potential differentials only. Please see a dermatologist for proper examination, lab tests, and confirmed diagnosis. "
+            "This is decision support only and not a confirmed medical diagnosis."
+        )

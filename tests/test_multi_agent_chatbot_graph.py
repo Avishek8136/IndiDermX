@@ -88,6 +88,15 @@ class FakeGraphRagService:
         return [{"disease": disease_name, "evidence": [{"title": "Graph context evidence", "source": "neo4j:context", "doi": ""}]}]
 
 
+class CountingGraphRagService:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def retrieve_context(self, disease_name: str, limit: int = 5) -> list[dict[str, Any]]:
+        self.calls.append(disease_name)
+        return [{"disease": disease_name, "evidence": []}]
+
+
 class EmptyGraphRagService:
     def retrieve_context(self, disease_name: str, limit: int = 5) -> list[dict[str, Any]]:
         return []
@@ -298,3 +307,89 @@ def test_multi_agent_falls_back_when_neo4j_errors() -> None:
     assert final["top_candidate"] is not None
     assert final["top_candidate"]["disease"] == "Tinea Corporis"
     assert any("neo4j_unavailable" in str(item.get("error", "")) for item in final["tool_trace"])
+
+
+def test_strict_mode_allows_medgemma_direct_inference_without_graph_candidates() -> None:
+    diagnosis_service = FakeDiagnosisService([])
+    workflow = build_chatbot_workflow(
+        diagnosis_service=diagnosis_service,
+        medgemma_service=FakeMedGemmaService(),
+        local_backup_service=FakeLocalBackupService([]),
+        local_rag_service=EmptyLocalRagService(),
+        graph_rag_service=EmptyGraphRagService(),
+        memory_service=TurnAwareMemoryService(prior_user_turns=1),
+        strict_neo4j_only=True,
+    )
+
+    state = workflow.invoke({"user_message": "it is patchy and itchy on my face", "session_id": "strict-1"})
+    final = state["final"]
+
+    assert final["used_fallback"] is False
+    assert final["top_candidate"] is None
+    assert final["candidate_list"] == []
+    assert "no strong match" in final["answer"].lower()
+    reason = ((final.get("explainability", {}).get("reasoning", {}).get("confidence", {}).get("reason", "")))
+    assert reason == "medgemma_direct_inference_no_graph_match"
+
+
+def test_multi_agent_graph_context_for_all_selected_candidates() -> None:
+    diagnosis_service = FakeDiagnosisService(
+        [
+            {
+                "main_class": "Infectious",
+                "sub_class": "Fungal",
+                "disease": "Tinea Cruris",
+                "score": 4.0,
+                "evidence": [],
+            },
+            {
+                "main_class": "Inflammatory",
+                "sub_class": "Dermatitis",
+                "disease": "Contact Dermatitis",
+                "score": 3.0,
+                "evidence": [],
+            },
+        ]
+    )
+    graph_rag_service = CountingGraphRagService()
+    workflow = build_chatbot_workflow(
+        diagnosis_service=diagnosis_service,
+        medgemma_service=FakeMedGemmaService(),
+        local_backup_service=FakeLocalBackupService([]),
+        local_rag_service=EmptyLocalRagService(),
+        graph_rag_service=graph_rag_service,
+        memory_service=FakeMemoryService(),
+    )
+
+    state = workflow.invoke({"user_message": "itchy patches on groin and trunk"})
+    final = state["final"]
+
+    assert final["used_fallback"] is False
+    assert set(graph_rag_service.calls) == {"Tinea Cruris", "Contact Dermatitis"}
+    assert len(final["graph_context"]) == 2
+
+
+def test_round_1_intake_engagement_with_minimal_input() -> None:
+    """On round 1 with no candidates and minimal input (very short message), engage with probing questions."""
+
+    diagnosis_service = FakeDiagnosisService([])  # No candidates from Neo4j
+    workflow = build_chatbot_workflow(
+        diagnosis_service=diagnosis_service,
+        medgemma_service=FakeMedGemmaService(),
+        local_backup_service=FakeLocalBackupService([]),
+        local_rag_service=EmptyLocalRagService(),
+        graph_rag_service=EmptyGraphRagService(),
+        memory_service=FakeMemoryService(),
+    )
+
+    state = workflow.invoke({"user_message": "Hi"})
+    final = state["final"]
+
+    # Should NOT abstain on round 1 with minimal input and no candidates
+    reason = ((final.get("explainability", {}).get("reasoning", {}).get("confidence", {}).get("reason", "")))
+    assert reason == "round_1_intake_engagement"
+
+    # Top candidate should be None but answer should be generated (simple engagement)
+    assert final["top_candidate"] is None
+    # The answer should be conversational (simple engagement, not diagnostic)
+    assert "Please answer the questions below" in final["answer"] or "clinical questions" in final["answer"]

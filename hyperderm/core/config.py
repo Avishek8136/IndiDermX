@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     bytez_timeout_seconds: int = 45
     build_resume: bool = True
     clear_graph_on_start: bool = True
+    strict_neo4j_only: bool = False
 
 
 settings = Settings()

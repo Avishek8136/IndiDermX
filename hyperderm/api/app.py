@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,6 +10,12 @@ from hyperderm.api.dependencies import create_container
 from hyperderm.api.routes.chatbot import router as chatbot_router
 from hyperderm.api.routes.diagnosis import router as diagnosis_router
 from hyperderm.api.routes.health import router as health_router
+
+# Configure logging to see all debug messages
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 
 @asynccontextmanager
