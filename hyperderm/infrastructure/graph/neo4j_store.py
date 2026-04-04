@@ -157,12 +157,12 @@ FOREACH (atom IN $atoms |
             doi_expr = "ev.doi" if has_doi else "''"
             evidence_branch = f"""
 OPTIONAL MATCH (d)-[:SUPPORTED_BY]->(ev:Evidence)
-WITH mc, sc, d, totalScore,
+WITH mc, sc, d, totalScore, matchedDescriptors, matchedBodyRegions, matchedSymptoms, matchedEffects, matchedVisualAtoms,
      [item IN collect(DISTINCT {{title: {title_expr}, source: {source_expr}, doi: {doi_expr}}})
       WHERE item.title <> '' OR item.source <> '' OR item.doi <> ''][0..3] AS evidenceRows
 """
         else:
-            evidence_branch = "WITH mc, sc, d, totalScore, [] AS evidenceRows"
+            evidence_branch = "WITH mc, sc, d, totalScore, matchedDescriptors, matchedBodyRegions, matchedSymptoms, matchedEffects, matchedVisualAtoms, [] AS evidenceRows"
 
         query = f"""
 MATCH (d:Disease)

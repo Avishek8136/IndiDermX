@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 from typing import Any
 
 from bytez import Bytez
@@ -30,6 +32,9 @@ def _extract_json(text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
 
+
+# Global lock to ensure sequential MedGemma API requests (free tier allows 1 request at a time)
+_medgemma_api_lock = threading.Lock()
 
 class MedGemmaChatService:
     BODY_PARTS = {
@@ -99,6 +104,7 @@ class MedGemmaChatService:
     def __init__(self) -> None:
         self._sdk = Bytez(settings.bytez_api_key)
         self._model = self._sdk.model(settings.bytez_model)
+        self._request_lock = _medgemma_api_lock  # Use global lock for rate limiting
 
     @staticmethod
     def _normalize_token(token: str) -> str:
@@ -225,24 +231,70 @@ class MedGemmaChatService:
         return clean
 
     def _run_text(self, prompt: str) -> str:
-        try:
-            logger.debug("Calling MedGemma LLM API")
-            result = self._model.run([{"role": "user", "content": prompt}])
-            if result.error:
-                logger.error(f"MedGemma returned error: {result.error}")
-                raise RuntimeError(str(result.error))
+        """Call MedGemma API with rate limiting and exponential backoff retry."""
+        max_retries = 5
+        base_wait_time = 2  # seconds
+        
+        for attempt in range(max_retries):
+            # Acquire lock to ensure sequential requests (free tier: 1 request at a time)
+            with self._request_lock:
+                try:
+                    logger.debug(f"Calling MedGemma LLM API (attempt {attempt + 1}/{max_retries})")
+                    result = self._model.run([{"role": "user", "content": prompt}])
+                    
+                    if result.error:
+                        error_msg = str(result.error).lower()
+                        # Check for rate limit error (429 or "rate limited" message)
+                        if "rate limited" in error_msg or "429" in error_msg or "too many requests" in error_msg:
+                            if attempt < max_retries - 1:
+                                # Calculate exponential backoff: 2s, 4s, 8s, 16s, 32s
+                                wait_time = base_wait_time * (2 ** attempt)
+                                logger.warning(
+                                    f"MedGemma rate limited. Retrying after {wait_time}s "
+                                    f"(attempt {attempt + 1}/{max_retries})"
+                                )
+                                time.sleep(wait_time)
+                                continue  # Retry the request
+                            else:
+                                logger.error(f"MedGemma rate limited after {max_retries} retries")
+                                raise RuntimeError(str(result.error))
+                        else:
+                            logger.error(f"MedGemma returned error: {result.error}")
+                            raise RuntimeError(str(result.error))
 
-            output = result.output
-            if isinstance(output, dict):
-                content = output.get("content")
-                response = str(content) if content is not None else json.dumps(output)
-            else:
-                response = str(output)
-            logger.debug(f"MedGemma response length: {len(response)} chars")
-            return response
-        except Exception as e:
-            logger.error(f"MedGemma API exception: {str(e)}")
-            raise
+                    output = result.output
+                    if isinstance(output, dict):
+                        content = output.get("content")
+                        response = str(content) if content is not None else json.dumps(output)
+                    else:
+                        response = str(output)
+                    logger.debug(f"MedGemma response length: {len(response)} chars")
+                    return response
+                    
+                except RuntimeError:
+                    # Re-raise RuntimeError from MedGemma API failures
+                    raise
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    # Handle network/connection rate limit errors
+                    if "rate limited" in error_msg or "429" in error_msg or "too many requests" in error_msg:
+                        if attempt < max_retries - 1:
+                            wait_time = base_wait_time * (2 ** attempt)
+                            logger.warning(
+                                f"MedGemma rate limited (connection error). Retrying after {wait_time}s "
+                                f"(attempt {attempt + 1}/{max_retries})"
+                            )
+                            time.sleep(wait_time)
+                            continue  # Retry the request
+                        else:
+                            logger.error(f"MedGemma rate limited after {max_retries} retries: {str(e)}")
+                            raise
+                    else:
+                        logger.error(f"MedGemma API exception: {str(e)}")
+                        raise
+        
+        # Should not reach here, but just in case
+        raise RuntimeError("MedGemma API call failed after all retries")
 
     def extract_query_features(self, message: str) -> dict[str, Any]:
         normalized_message = self._normalize_message_text(message)
