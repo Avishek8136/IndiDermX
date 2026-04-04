@@ -20,6 +20,18 @@ class FakeDiagnosisService:
         return self._candidates[:limit]
 
 
+class FailingDiagnosisService:
+    def retrieve_candidates(
+        self,
+        descriptors: list[str],
+        body_part: str,
+        symptoms: list[str],
+        effects: list[str],
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        raise RuntimeError("neo4j unavailable")
+
+
 class FakeMedGemmaService:
     def extract_query_features(self, message: str) -> dict[str, Any]:
         return {
@@ -257,3 +269,32 @@ def test_multi_agent_forces_diagnosis_by_third_round() -> None:
     assert final["top_candidate"]["disease"] == "Acne"
     assert final["candidate_list"]
     assert final["suggested_questions"] == []
+
+
+def test_multi_agent_falls_back_when_neo4j_errors() -> None:
+    workflow = build_chatbot_workflow(
+        diagnosis_service=FailingDiagnosisService(),
+        medgemma_service=FakeMedGemmaService(),
+        local_backup_service=FakeLocalBackupService(
+            [
+                {
+                    "main_class": "Infectious",
+                    "sub_class": "Fungal",
+                    "disease": "Tinea Corporis",
+                    "score": 3.0,
+                    "evidence": [],
+                }
+            ]
+        ),
+        local_rag_service=FakeLocalRagService(),
+        graph_rag_service=EmptyGraphRagService(),
+        memory_service=FakeMemoryService(),
+    )
+
+    state = workflow.invoke({"user_message": "itchy ring lesion on trunk"})
+    final = state["final"]
+
+    assert final["used_fallback"] is True
+    assert final["top_candidate"] is not None
+    assert final["top_candidate"]["disease"] == "Tinea Corporis"
+    assert any("neo4j_unavailable" in str(item.get("error", "")) for item in final["tool_trace"])

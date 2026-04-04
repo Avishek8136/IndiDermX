@@ -70,6 +70,37 @@
       padding: 6px 10px;
       border-radius: 999px;
     }
+    .status-banner {
+      margin: 0 18px 14px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid #f59e0b;
+      background: #fffbeb;
+      color: #92400e;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 0.88rem;
+    }
+    .status-banner.connected {
+      border-color: #86efac;
+      background: #f0fdf4;
+      color: #166534;
+    }
+    .status-banner.disconnected {
+      border-color: #fecaca;
+      background: #fef2f2;
+      color: #991b1b;
+    }
+    .status-label {
+      font-weight: 700;
+    }
+    .status-subtle {
+      color: inherit;
+      opacity: 0.8;
+      font-size: 0.82rem;
+    }
     .ghost {
       border: 1px solid var(--line);
       background: #ffffff;
@@ -242,6 +273,13 @@
         <div class="badge">Assistive, not definitive</div>
       </div>
     </div>
+    <div id="statusBanner" class="status-banner">
+      <div>
+        <span class="status-label">Backend status:</span>
+        <span id="statusText">Checking connectivity...</span>
+      </div>
+      <div id="statusDetail" class="status-subtle">API health not checked yet</div>
+    </div>
     <div id="log"></div>
     <div class="bar">
       <div class="inputs">
@@ -268,6 +306,9 @@
     const uploadStatus = document.getElementById("uploadStatus");
     const sendBtn = document.getElementById("send");
     const newSessionBtn = document.getElementById("newSessionBtn");
+    const statusBanner = document.getElementById("statusBanner");
+    const statusText = document.getElementById("statusText");
+    const statusDetail = document.getElementById("statusDetail");
     let apiBase = "http://127.0.0.1:8000";
     const sessionKey = "hyperdermSessionId";
 
@@ -364,6 +405,26 @@
         const data = await res.json();
         apiBase = data.apiBaseUrl || apiBase;
       } catch (_) {}
+    }
+
+    async function refreshBackendStatus() {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
+        const res = await fetch(`${apiBase}/health`, { signal: controller.signal, cache: "no-store" });
+        clearTimeout(timeoutId);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        statusBanner.classList.remove("disconnected");
+        statusBanner.classList.add("connected");
+        statusText.textContent = "Connected";
+        statusDetail.textContent = `Backend health: ${data.status || "ok"}`;
+      } catch (err) {
+        statusBanner.classList.remove("connected");
+        statusBanner.classList.add("disconnected");
+        statusText.textContent = "Disconnected";
+        statusDetail.textContent = `Cannot reach ${apiBase}/health`;
+      }
     }
 
     async function uploadImage() {
@@ -466,7 +527,8 @@
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") ask();
     });
 
-    loadConfig();
+    loadConfig().then(refreshBackendStatus);
+    setInterval(refreshBackendStatus, 15000);
     add("bot", "Ready. Ask a dermatology question with descriptors and location.", `Session: ${getSessionId()}`);
   </script>
 </body>

@@ -181,13 +181,29 @@ def build_chatbot_workflow(
         }
 
     def node_diagnose_neo4j(state: ChatbotState) -> ChatbotState:
-        candidates = diagnosis_service.retrieve_candidates(
-            descriptors=state.get("descriptors", []),
-            body_part=state.get("body_part", ""),
-            symptoms=state.get("symptoms", []),
-            effects=state.get("effects", []),
-            limit=5,
-        )
+        try:
+            candidates = diagnosis_service.retrieve_candidates(
+                descriptors=state.get("descriptors", []),
+                body_part=state.get("body_part", ""),
+                symptoms=state.get("symptoms", []),
+                effects=state.get("effects", []),
+                limit=5,
+            )
+        except Exception as error:
+            # Neo4j can be unavailable in local/dev environments. Treat as no candidates
+            # so the graph routes into local backup fallback instead of returning 500.
+            return {
+                "neo4j_candidates": [],
+                "tool_trace": _append_trace(
+                    state,
+                    {
+                        "step": "neo4j_diagnosis_tool",
+                        "agent": "neo4j_diagnosis_agent",
+                        "candidate_count": 0,
+                        "error": f"neo4j_unavailable:{type(error).__name__}",
+                    },
+                ),
+            }
         return {
             "neo4j_candidates": candidates,
             "tool_trace": _append_trace(
@@ -230,9 +246,14 @@ def build_chatbot_workflow(
         candidates = state.get("neo4j_candidates", [])
         graph_context = []
         graph_rag_attempted = False
+        graph_rag_error = ""
         if candidates:
             graph_rag_attempted = True
-            graph_context = graph_rag_service.retrieve_context(str(candidates[0].get("disease", "")).strip(), limit=5)
+            try:
+                graph_context = graph_rag_service.retrieve_context(str(candidates[0].get("disease", "")).strip(), limit=5)
+            except Exception as error:
+                graph_context = []
+                graph_rag_error = f"graph_rag_unavailable:{type(error).__name__}"
         return {
             "selected_candidates": candidates,
             "graph_context": graph_context,
@@ -246,6 +267,7 @@ def build_chatbot_workflow(
                     "candidate_count": len(candidates),
                     "graph_rag_attempted": graph_rag_attempted,
                     "graph_rag_context_count": len(graph_context),
+                    "graph_rag_error": graph_rag_error,
                 },
             ),
         }

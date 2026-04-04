@@ -51,6 +51,8 @@ class MedGemmaChatService:
         "erythema",
         "plaque",
         "scaling",
+        "fungal",
+        "tinea",
         "papule",
         "pustule",
         "nodule",
@@ -105,6 +107,18 @@ class MedGemmaChatService:
             "itching": "itch",
             "cheek": "face",
             "cheeks": "face",
+            "facial": "face",
+            "face": "face",
+            "fungal": "fungal",
+            "fungus": "fungal",
+            "fungalinfection": "fungal",
+            "fungalinfections": "fungal",
+            "ringworm": "annular",
+            "ringworms": "annular",
+            "ring": "annular",
+            "ringshaped": "annular",
+            "ringlike": "annular",
+            "tinea": "tinea",
             "blackspot": "spot",
             "blackspots": "spot",
             "spots": "spot",
@@ -115,6 +129,28 @@ class MedGemmaChatService:
             "spreading": "spread",
         }
         return synonyms.get(t, t)
+
+    @staticmethod
+    def _normalize_message_text(message: str) -> str:
+        text = message.lower()
+        replacements = {
+            "fungal infections": "fungal infection",
+            "fungal infection": "fungal",
+            "ring worm": "ringworm",
+            "ring worms": "ringworm",
+            "ring-shaped": "ringshaped",
+            "ring like": "ringlike",
+            "ring-like": "ringlike",
+            "cheek area": "cheeks",
+            "cheek region": "cheeks",
+            "on the cheeks": "cheeks",
+            "on cheeks": "cheeks",
+            "face area": "face",
+            "on the face": "face",
+        }
+        for source, target in replacements.items():
+            text = text.replace(source, target)
+        return text
 
     @staticmethod
     def _deterministic_candidate_answer(top_candidate: dict[str, Any], evidence: list[dict[str, Any]] | None = None) -> str:
@@ -197,10 +233,11 @@ class MedGemmaChatService:
         return str(output)
 
     def extract_query_features(self, message: str) -> dict[str, Any]:
+        normalized_message = self._normalize_message_text(message)
         prompt = (
             "Extract structured dermatology query fields. Return only JSON with keys "
             "descriptors (array), body_part (string), symptoms (array), effects (array).\n"
-            f"message: {message}"
+            f"message: {normalized_message}"
         )
         try:
             raw = self._run_text(prompt)
@@ -228,7 +265,7 @@ class MedGemmaChatService:
                 "source": "medgemma",
             }
 
-        text = message.lower()
+        text = normalized_message
         tokens = re.findall(r"[a-zA-Z]+", text)
         normalized = [self._normalize_token(token) for token in tokens]
         descriptors = sorted({token for token in normalized if token in self.DESCRIPTORS})
