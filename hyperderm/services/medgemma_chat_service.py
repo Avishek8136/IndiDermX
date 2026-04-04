@@ -164,18 +164,18 @@ class MedGemmaChatService:
     @staticmethod
     def _deterministic_candidate_answer(top_candidate: dict[str, Any], evidence: list[dict[str, Any]] | None = None) -> str:
         disease = str(top_candidate.get("disease", "Unknown")).strip() or "Unknown"
-        main_class = str(top_candidate.get("main_class", "Other")).strip() or "Other"
-        sub_class = str(top_candidate.get("sub_class", "Unspecified")).strip() or "Unspecified"
-        score = float(top_candidate.get("score", 0.0))
-        confidence = "low" if score < 3.0 else ("moderate" if score < 6.0 else "higher")
         evidence_count = len(evidence or [])
+        if evidence_count == 0:
+            return (
+                "I do not have enough reliable evidence yet to name a specific condition. "
+                "Please share a bit more detail about appearance, location, duration, and symptoms, "
+                "or upload a clear image so I can guide you better. "
+                "This is decision support only and not a confirmed medical diagnosis."
+            )
         return (
-            f"Most likely condition from available signals is {disease}. "
-            f"Hierarchy: {main_class} > {sub_class} > {disease}. "
-            f"This is a {confidence}-confidence decision-support estimate"
-            f" based on the matched descriptors and location"
-            f" with {evidence_count} supporting evidence item(s). "
-            "Please confirm with a dermatologist. This is decision support only and not a confirmed medical diagnosis."
+            f"Based on what you have shared, this might be {disease}. "
+            "I cannot confirm this in chat alone, so please monitor for worsening and seek an in-person dermatology exam if needed. "
+            "This is decision support only and not a confirmed medical diagnosis."
         )
 
     @classmethod
@@ -355,6 +355,83 @@ class MedGemmaChatService:
             "source": "heuristic",
         }
 
+    @staticmethod
+    def _detect_advice_intent(user_message: str) -> bool:
+        """Detect if user is asking for management/care advice rather than diagnosis."""
+        message_lower = user_message.lower()
+        advice_keywords = [
+            "avoid", "care", "what should", "tips", "prevent",
+            "treat", "manage", "do i", "how to", "what can i",
+            "should i", "wash", "apply", "dry", "keep", "don't",
+            "guidance", "recommendation", "best practice"
+        ]
+        return any(keyword in message_lower for keyword in advice_keywords)
+
+    @staticmethod
+    def _extract_asked_questions_from_history(memory_summary: str) -> set[str]:
+        """Extract previously asked questions from memory summary to avoid repetition."""
+        asked = set()
+        history_lines = memory_summary.lower().split("\n")
+        question_indicators = ["?", "asked", "question", "asked about", "do you"]
+        for line in history_lines:
+            if any(indicator in line for indicator in question_indicators):
+                # Extract question words to avoid similar questions
+                words = line.split()
+                if words:
+                    asked.add(" ".join(words[:3]))  # Store first 3 words as topic
+        return asked
+
+    def _generate_advice_response(self, user_message: str, top_candidate: dict[str, Any] | None) -> str:
+        """Generate practical management and care advice based on suspected condition."""
+        disease = str(top_candidate.get("disease", "")).strip().lower() if top_candidate else ""
+        
+        # General fungal infection advice
+        if "fungal" in disease or "tinea" in disease or "ringworm" in disease:
+            advice = (
+                "**Management Tips for Fungal Infections:**\n\n"
+                "- Keep the area clean and dry (fungal thrive in moisture)\n"
+                "- Wash gently with mild soap daily\n"
+                "- Pat dry thoroughly, especially in folds\n"
+                "- Wear breathable, loose-fitting clothing\n"
+                "- Avoid sharing washcloths, towels, or personal items\n"
+                "- Wash hands thoroughly after touching the affected area\n"
+                "- Consider using antifungal powder (OTC) after consulting product instructions\n"
+                "- Keep fingernails trimmed to avoid scratching and spreading infection\n"
+                "- Monitor for spread; if worsening, seek dermatology evaluation\n"
+                "- Avoid swimming in public pools until cleared by a doctor\n\n"
+                "⚠️ This is general guidance only. Confirm with a dermatologist before using any treatments."
+            )
+        # General inflammatory/dermatitis advice
+        elif any(term in disease for term in ["dermatitis", "eczema", "psoriasis", "inflammatory"]):
+            advice = (
+                "**Management Tips for Inflammatory Skin Conditions:**\n\n"
+                "- Avoid known triggers (harsh soaps, allergens, irritants)\n"
+                "- Use fragrance-free, hypoallergenic moisturizer regularly\n"
+                "- Apply moisturizer to damp skin within 3 minutes of bathing\n"
+                "- Use lukewarm (not hot) water for washing\n"
+                "- Avoid excessive cleaning or scrubbing\n"
+                "- Wear soft, breathable fabrics (cotton when possible)\n"
+                "- Keep stress low (stress can worsen conditions)\n"
+                "- Patch test any new products on a small area first\n"
+                "- If itching is severe, avoid scratching; consider wearing gloves at night\n"
+                "- Track what seems to trigger or improve the condition\n\n"
+                "⚠️ If symptoms worsen or persist beyond 2 weeks, consult a dermatologist."
+            )
+        else:
+            # Generic advice
+            advice = (
+                "**General Skin Care Recommendations:**\n\n"
+                "- Keep the area clean and dry\n"
+                "- Avoid scratching or picking\n"
+                "- Use gentle, fragrance-free cleaners\n"
+                "- Apply moisturizer as needed\n"
+                "- Avoid irritants and known allergens\n"
+                "- Monitor for changes or worsening\n"
+                "- See a dermatologist if not improving in 1-2 weeks\n\n"
+                "⚠️ This is assistive guidance only. A proper diagnosis requires an in-person exam."
+            )
+        return advice
+
     def generate_chat_answer(
         self,
         user_message: str,
@@ -364,8 +441,15 @@ class MedGemmaChatService:
         visual_features: dict[str, Any] | None = None,
         graph_context: list[dict[str, Any]] | None = None,
         memory_summary: str = "",
+        recent_messages: list[dict[str, Any]] | None = None,
         suggested_questions: list[str] | None = None,
     ) -> str:
+        # Check if user is asking for advice/management rather than diagnosis
+        is_advice_request = self._detect_advice_intent(user_message)
+        if is_advice_request and top_candidate:
+            logger.info("User requesting advice/management guidance")
+            return self._generate_advice_response(user_message, top_candidate)
+
         candidate_reasoning = [
             {
                 "disease": item.get("disease", ""),
@@ -379,30 +463,40 @@ class MedGemmaChatService:
             for item in candidates[:5]
         ]
 
+        # Build conversation history context
+        recent_context = ""
+        if recent_messages:
+            recent_context = "Recent conversation history:\n"
+            for msg in recent_messages[-6:]:  # Last 6 messages for context
+                role = str(msg.get("role", "")).capitalize()
+                content = str(msg.get("content", "")).strip()[:300]  # Truncate long messages
+                recent_context += f"{role}: {content}\n"
+            recent_context += "\n"
+
+        # Identify previously asked questions to avoid repetition
+        asked_questions = self._extract_asked_questions_from_history(memory_summary) if memory_summary else set()
+
         prompt = (
-            "You are an experienced dermatologist speaking with a patient in clinic. "
-            "Respond in ENGLISH only. "
-            "Sound natural, calm, and clinically practical, not robotic. "
-            "Use concise plain text with exactly three sections and these labels: "
-            "Probable condition:, Why this matches:, Clinical caution:. "
-            "Keep each section short (2-4 sentences) and avoid repeating the same phrasing. "
-            "In 'Why this matches', explicitly reference matched descriptors/body/symptoms/effects from neo4j_candidate_reasoning. "
-            "In 'Why this matches', you may also reference evidence and graph_context details only when they are available. "
-            "Address the user directly with empathetic doctor-style language (for example: 'Thanks, that helps' or 'From what you've described'). "
-            "If evidence is weak, explicitly say what additional patient details are needed. "
-            "If candidate_list is empty, still provide a provisional model-only differential in 'Probable condition' based on user_message and visual_features, "
-            "and avoid mentioning internal tools, graph retrieval, or system internals. "
-            "If candidate_list is empty and suggested_questions are provided, include 1-2 of those questions conversationally in the 'Clinical caution' section. "
-            "Do not invent details. Do not mention unsupported body parts. Do not claim certainty.\n\n"
-            f"user_message: {user_message}\n"
-            f"top_candidate: {top_candidate or {}}\n"
-            f"candidate_list: {candidates[:3]}\n"
-            f"neo4j_candidate_reasoning: {candidate_reasoning}\n"
-            f"supporting_evidence: {evidence[:5]}\n"
-            f"visual_features: {visual_features or {}}\n"
-            f"graph_context: {graph_context[:5] if graph_context else []}\n"
-            f"memory_summary: {memory_summary}\n"
-            f"suggested_questions: {suggested_questions or []}\n"
+            "You are a helpful, empathetic dermatology assistant in a clinic setting.\n\n"
+            "IMPORTANT RULES:\n"
+            "1. ANSWER THE USER'S DIRECT QUESTION FIRST before asking your own questions.\n"
+            "2. NEVER ask the same question twice. Review the conversation history below and avoid asking about things already addressed.\n"
+            "3. Ask ONE follow-up question at a time to gather missing diagnostic information.\n"
+            "4. Use natural, empathetic language. Avoid robotic templates.\n"
+            "5. Respond in ENGLISH only.\n\n"
+            "RESPONSE STRUCTURE:\n"
+            "Start with your conversational response addressing the current message.\n"
+            "If more information is needed, ask a SINGLE focused follow-up question.\n"
+            "End with: '---\nThis is decision support only and not a confirmed medical diagnosis.'"
+            "\n\n"
+            f"{recent_context}"
+            f"Current user message: {user_message}\n"
+            f"Previously discussed topics (avoid re-asking): {asked_questions or 'none yet'}\n\n"
+            f"Available diagnostic reasoning:\n"
+            f"  Top candidate: {top_candidate or 'None'}\n"
+            f"  Other candidates: {candidates[:2] if candidates else 'None'}\n"
+            f"  Supporting evidence: {len(evidence or [])} items\n"
+            f"  Visual features: {visual_features.get('visual_atoms', []) if visual_features else 'None'}\n\n"
         )
 
         try:
@@ -425,8 +519,11 @@ class MedGemmaChatService:
             # Last resort
             logger.error("No fallback available, returning generic message")
             return (
-                "I could not confidently identify a condition from the available signals. "
-                "Please consult a dermatologist for an in-person evaluation."
+                "I'm having some difficulty processing that. Let me try a different approach.\n\n"
+                "Based on what you've described, the most important next step is to consult with a dermatologist "
+                "for an in-person evaluation, especially if the condition is worsening.\n\n"
+                "---\n"
+                "This is decision support only and not a confirmed medical diagnosis."
             )
 
     def _direct_medgemma_diagnosis(self, user_message: str, visual_features: dict[str, Any] | None = None) -> str:

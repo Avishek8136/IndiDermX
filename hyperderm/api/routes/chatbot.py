@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import shutil
+import threading
 import uuid
 from pathlib import Path
 
@@ -11,6 +13,12 @@ from hyperderm.core.config import settings
 from hyperderm.domain.schemas import ChatbotRequest, ChatbotResponse
 
 router = APIRouter(tags=["chatbot"])
+logger = logging.getLogger(__name__)
+
+# Free-tier MedGemma allows one in-flight request. Enforce a strict app-level queue.
+_chat_request_lock = threading.Lock()
+_queue_counter_lock = threading.Lock()
+_queued_or_running_requests = 0
 
 
 def get_container(request: Request) -> AppContainer:
@@ -44,14 +52,30 @@ def chat_via_mcp_tool(
     payload: ChatbotRequest,
     container: AppContainer = Depends(get_container),
 ) -> ChatbotResponse:
+    global _queued_or_running_requests
+
     session_id = payload.session_id or str(uuid.uuid4())
-    result = container.chat_mcp_tool.invoke(
-        {
-            "user_message": payload.message,
-            "session_id": session_id,
-            "image_path": payload.image_path,
-        }
-    )
+
+    with _queue_counter_lock:
+        _queued_or_running_requests += 1
+        queued_ahead = _queued_or_running_requests - 1
+
+    if queued_ahead > 0:
+        logger.info("Session %s queued behind %s request(s)", session_id, queued_ahead)
+
+    try:
+        with _chat_request_lock:
+            result = container.chat_mcp_tool.invoke(
+                {
+                    "user_message": payload.message,
+                    "session_id": session_id,
+                    "image_path": payload.image_path,
+                }
+            )
+    finally:
+        with _queue_counter_lock:
+            _queued_or_running_requests = max(0, _queued_or_running_requests - 1)
+
     final = result.get("result", {})
     return ChatbotResponse(
         session_id=session_id,

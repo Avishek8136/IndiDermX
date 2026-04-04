@@ -585,11 +585,22 @@
       add("user", message);
       promptBox.value = "";
       sendBtn.disabled = true;
-      const pending = add("bot", "Thinking...");
+      const pending = add("bot", "Checking your symptoms... you may be in a brief queue.");
+      let waitSeconds = 0;
+      const pendingTicker = setInterval(() => {
+        waitSeconds += 4;
+        if (waitSeconds < 16) {
+          pending.textContent = "Checking your symptoms... you may be in a brief queue.";
+        } else if (waitSeconds < 45) {
+          pending.textContent = "Still working on your case. Thanks for waiting in the queue.";
+        } else {
+          pending.textContent = "Still processing carefully. Your place in the queue is active.";
+        }
+      }, 4000);
 
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 90000);
+        const timeoutId = setTimeout(() => controller.abort(), 180000);
         const activeSession = getSessionId();
         const res = await fetch(`${apiBase}/chat/mcp`, {
           method: "POST",
@@ -598,12 +609,12 @@
           signal: controller.signal,
         });
         clearTimeout(timeoutId);
+        clearInterval(pendingTicker);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (data.session_id) sessionStorage.setItem(sessionKey, data.session_id);
 
-        const top = data.top_candidate ? `${data.top_candidate.disease} (score ${data.top_candidate.score})` : "No strong match";
-        const meta = `Model: ${data.model} | Fallback: ${data.used_fallback ? "yes" : "no"} | Top: ${top} | Session: ${data.session_id || activeSession}`;
+        const meta = `Session: ${data.session_id || activeSession}`;
         pending.remove();
         const answer = stripGraphSection(data.answer || "No response");
         addAssistantReport(answer, meta);
@@ -630,12 +641,15 @@
           log.scrollTop = log.scrollHeight;
         }
       } catch (err) {
+        clearInterval(pendingTicker);
         pending.remove();
-        const msg = err && err.name === "AbortError"
-          ? "Request timed out after 90s. Please retry or use a shorter prompt."
-          : "Request failed. Check backend API or CORS settings.";
-        add("bot", msg, String(err));
+        let msg = "Request failed. Check backend API or CORS settings.";
+        if (err && err.name === "AbortError") {
+          msg = "This is taking longer than expected. Your request may still be queued; please retry in a moment.";
+        }
+        add("bot", msg, String(err).substring(0, 100));
       } finally {
+        clearInterval(pendingTicker);
         sendBtn.disabled = false;
       }
     }

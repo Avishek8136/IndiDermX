@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -19,6 +20,9 @@ class ChatbotState(TypedDict, total=False):
     image_path: str | None
     plan: dict[str, Any]
     memory_slots: dict[str, Any]
+    recent_messages: list[dict[str, Any]]
+    greeting_intent: bool
+    current_turn_signal_count: int
     conversation_round: int
     force_diagnosis: bool
     descriptors: list[str]
@@ -90,13 +94,32 @@ def build_chatbot_workflow(
         trace.append(event)
         return trace
 
+    def _is_greeting_or_small_talk(message: str) -> bool:
+        normalized = re.sub(r"[^a-z\s]", "", (message or "").strip().lower())
+        if not normalized:
+            return True
+        minimal = {
+            "hi",
+            "hello",
+            "hey",
+            "help",
+            "yo",
+            "hola",
+            "good morning",
+            "good evening",
+            "good afternoon",
+        }
+        return normalized in minimal
+
     def node_supervisor_plan(state: ChatbotState) -> ChatbotState:
         session_id = state.get("session_id") or "default"
+        user_message = str(state.get("user_message", ""))
         recent = _safe_memory_load_recent(session_id, limit=12)
         memory_summary = _safe_memory_summary(session_id)
         prior_user_turns = sum(1 for row in recent if str(row.get("role", "")).lower() == "user")
         conversation_round = prior_user_turns + 1
         force_diagnosis = conversation_round >= 3
+        greeting_intent = _is_greeting_or_small_talk(user_message)
 
         slots: dict[str, Any] = {
             "descriptors": [],
@@ -132,6 +155,8 @@ def build_chatbot_workflow(
                 ]
             },
             "memory_summary": memory_summary,
+            "recent_messages": recent,
+            "greeting_intent": greeting_intent,
             "memory_slots": slots,
             "conversation_round": conversation_round,
             "force_diagnosis": force_diagnosis,
@@ -163,11 +188,19 @@ def build_chatbot_workflow(
         merged_symptoms = sorted({*memory_slots.get("symptoms", []), *extracted.get("symptoms", [])})
         merged_effects = sorted({*memory_slots.get("effects", []), *extracted.get("effects", [])})
         body_part = extracted.get("body_part", "") or memory_slots.get("body_part", "")
+        current_turn_signal_count = (
+            len(extracted.get("descriptors", []))
+            + len(extracted.get("symptoms", []))
+            + len(extracted.get("effects", []))
+            + (1 if extracted.get("body_part", "") else 0)
+            + len(visual_features.get("descriptor_tokens", []))
+        )
         return {
             "descriptors": merged_descriptors,
             "body_part": body_part,
             "symptoms": merged_symptoms,
             "effects": merged_effects,
+            "current_turn_signal_count": current_turn_signal_count,
             "extraction_source": extracted.get("source", "unknown"),
             "visual_features": visual_features,
             "tool_trace": _append_trace(
@@ -358,14 +391,31 @@ def build_chatbot_workflow(
         body_part = (state.get("body_part") or "").lower()
         candidate_name = str(top.get("disease", "")).lower()
         questions: list[str] = []
+        
+        # Extract previously asked questions from conversation history
+        recent_messages = state.get("recent_messages", [])
+        previously_asked = set()
+        for msg in recent_messages:
+            if str(msg.get("role", "")).lower() == "assistant":
+                content = str(msg.get("content", "")).lower()
+                # Mark topics that have been discussed
+                if "body" in content or "location" in content or "where" in content:
+                    previously_asked.add("location")
+                if "descriptor" in content or "look" in content or "appearance" in content or "shape" in content:
+                    previously_asked.add("appearance")
+                if "symptom" in content or "itch" in content or "pain" in content or "burning" in content:
+                    previously_asked.add("symptom")
+                if "spread" in content or "mark" in content or "ooz" in content or "crack" in content:
+                    previously_asked.add("progression")
 
-        if not body_part:
+        # Only add questions for topics not yet discussed
+        if "location" not in previously_asked and not body_part:
             questions.append("Which part of your body is most affected right now?")
-        if not state.get("descriptors"):
+        if "appearance" not in previously_asked and not state.get("descriptors"):
             questions.append("How does it look: flat, scaly, raised, ring-shaped, or patchy?")
-        if not state.get("symptoms"):
+        if "symptom" not in previously_asked and not state.get("symptoms"):
             questions.append("Do you feel itching, pain, burning, or none of these?")
-        if not state.get("effects"):
+        if "progression" not in previously_asked and not state.get("effects"):
             questions.append("Has it spread, cracked, oozed, or left marks over time?")
 
         if "acne" in candidate_name:
@@ -397,13 +447,13 @@ def build_chatbot_workflow(
                 filtered.append(clean)
 
         return {
-            "suggested_questions": filtered[:5],
+            "suggested_questions": filtered[:3],  # Reduced from 5 to 3 for focus
             "tool_trace": _append_trace(
                 state,
                 {
                     "step": "generate_patient_questions",
                     "agent": "supervisor_agent",
-                    "question_count": len(filtered[:5]),
+                    "question_count": len(filtered[:3]),
                 },
             ),
         }
@@ -414,15 +464,25 @@ def build_chatbot_workflow(
         top_score = float(top.get("score", 0.0)) if top else 0.0
         evidence_count = len(state.get("supporting_evidence", []))
         conversation_round = int(state.get("conversation_round", 1) or 1)
+        current_turn_signal_count = int(state.get("current_turn_signal_count", 0) or 0)
 
         has_signal = bool(state.get("descriptors") or state.get("symptoms") or state.get("body_part"))
         force_diagnosis = bool(state.get("force_diagnosis", False))
         user_message = str(state.get("user_message", "")).strip().lower()
+        greeting_intent = bool(state.get("greeting_intent", False))
 
-        if force_diagnosis and selected and has_signal and top_score > 0.0:
+        if greeting_intent and current_turn_signal_count == 0:
+            # Pure greeting/small-talk should never trigger diagnosis.
+            should_abstain = False
+            reason = "greeting_intake_engagement"
+        elif current_turn_signal_count < 2 and evidence_count == 0:
+            # Hard floor: without minimum fresh signal and evidence, ask for more info.
+            should_abstain = True
+            reason = "insufficient_signal_or_evidence"
+        elif force_diagnosis and selected and has_signal and top_score > 0.0 and evidence_count > 0 and current_turn_signal_count >= 2:
             should_abstain = False
             reason = "forced_diagnosis_after_round_limit"
-        elif strict_neo4j_only and (not selected) and has_signal and conversation_round >= 2:
+        elif strict_neo4j_only and (not selected) and has_signal and conversation_round >= 2 and current_turn_signal_count >= 2:
             # In strict graph mode, allow MedGemma to provide model-only differential reasoning
             # after enough conversational signal, even when graph has no candidate match.
             should_abstain = False
@@ -433,7 +493,14 @@ def build_chatbot_workflow(
             should_abstain = False
             reason = "round_1_intake_engagement"
         else:
-            should_abstain = (not selected) or (top_score <= 0.0) or (not has_signal) or (top_score < 3.0 and evidence_count == 0)
+            should_abstain = (
+                (not selected)
+                or (top_score <= 0.0)
+                or (not has_signal)
+                or (evidence_count == 0)
+                or (current_turn_signal_count < 2)
+                or (top_score < 3.0 and evidence_count == 0)
+            )
             reason = "low_confidence_or_no_signal" if should_abstain else "sufficient_signal"
 
         return {
@@ -458,11 +525,19 @@ def build_chatbot_workflow(
         return "abstain" if state.get("should_abstain") else "generate"
 
     def node_abstain_answer(state: ChatbotState) -> ChatbotState:
-        message = (
-            "Thanks for sharing that. I do not yet have enough reliable evidence to provide a specific diagnosis. "
-            "Please tell me a bit more about the shape, exact location, duration, spread, and symptoms (itch, pain, burning, discharge). "
-            "If this is worsening quickly, painful, or spreading, please consult a dermatologist for an in-person exam soon."
-        )
+        reason = str(state.get("abstain_reason", "low_confidence_or_no_signal"))
+        if reason == "insufficient_signal_or_evidence":
+            message = (
+                "I need a little more information before suggesting a likely condition. "
+                "Please share where it is located, how it looks (patchy/scaly/ring-shaped), and what you feel (itch, pain, burning). "
+                "If possible, upload a clear photo so I can help more accurately."
+            )
+        else:
+            message = (
+                "Thanks for sharing that. I do not yet have enough reliable evidence to provide a specific diagnosis. "
+                "Please tell me a bit more about the shape, exact location, duration, spread, and symptoms (itch, pain, burning, discharge). "
+                "If this is worsening quickly, painful, or spreading, please consult a dermatologist for an in-person exam soon."
+            )
         return {
             "draft_answer": message,
             "tool_trace": _append_trace(
@@ -482,11 +557,11 @@ def build_chatbot_workflow(
         
         # On round 1 intake engagement, generate a simple welcome message
         # The questions will be presented separately via suggested_questions UI element
-        if abstain_reason == "round_1_intake_engagement":
+        if abstain_reason in {"round_1_intake_engagement", "greeting_intake_engagement"}:
             answer = (
-                "Hi, I can help with this. "
-                "I will ask a few focused questions first so we can narrow it down safely. "
-                "Please answer the questions below, and then I'll give you the most likely possibilities."
+                "Hello, I can help with this. "
+                "Please describe your skin concern (where it is, how it looks, and symptoms like itch or pain), "
+                "or upload a photo so I can guide you safely."
             )
         else:
             answer = medgemma_service.generate_chat_answer(
@@ -497,6 +572,7 @@ def build_chatbot_workflow(
                 visual_features=state.get("visual_features", {}),
                 graph_context=state.get("graph_context", []),
                 memory_summary=state.get("memory_summary", ""),
+                recent_messages=state.get("recent_messages", []),
                 suggested_questions=state.get("suggested_questions", []),
             )
 
