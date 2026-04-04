@@ -432,9 +432,15 @@
         .replace(/'/g, "&#39;");
     }
 
+    function stripGraphSection(rawText) {
+      const raw = String(rawText || "");
+      const graphBlock = /\bGraph evidence used:\s*[\s\S]*?(?=\bClinical caution:|$)/gi;
+      return raw.replace(graphBlock, "").replace(/\n{3,}/g, "\n\n").trim();
+    }
+
     function formatDoctorReport(text) {
-      const raw = String(text || "").trim();
-      const sectionRegex = /(Probable condition:|Why this matches:|Graph evidence used:|Clinical caution:)/gi;
+      const raw = stripGraphSection(String(text || "").trim());
+      const sectionRegex = /(Probable condition:|Why this matches:|Clinical caution:)/gi;
       const chunks = raw.split(sectionRegex).filter(Boolean);
 
       if (chunks.length < 3) {
@@ -599,9 +605,8 @@
         const top = data.top_candidate ? `${data.top_candidate.disease} (score ${data.top_candidate.score})` : "No strong match";
         const meta = `Model: ${data.model} | Fallback: ${data.used_fallback ? "yes" : "no"} | Top: ${top} | Session: ${data.session_id || activeSession}`;
         pending.remove();
-        const answer = data.answer || "No response";
-        const msgEl = addAssistantReport(answer, meta);
-        renderExplainability(msgEl, data.explainability || {});
+        const answer = stripGraphSection(data.answer || "No response");
+        addAssistantReport(answer, meta);
 
         if (Array.isArray(data.suggested_questions) && data.suggested_questions.length) {
           const q = document.createElement("div");
