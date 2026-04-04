@@ -405,7 +405,7 @@
       imagePathBox.value = "";
       uploadStatus.textContent = "No image uploaded.";
       log.innerHTML = "";
-      add("bot", "Started a new chat session. Ask a dermatology question with descriptors and location.", `Session: ${id}`);
+      add("bot", "Started a new chat session. Tell me what you are noticing on your skin and where it is.", `Session: ${id}`);
     }
 
     function add(role, text, meta = "") {
@@ -606,7 +606,7 @@
         if (Array.isArray(data.suggested_questions) && data.suggested_questions.length) {
           const q = document.createElement("div");
           q.className = "msg bot";
-          q.innerHTML = "<strong>Questions to answer next:</strong>";
+          q.innerHTML = "<strong>To narrow this down, could you answer:</strong>";
           const list = document.createElement("div");
           list.className = "questions";
           data.suggested_questions.forEach((item) => {
@@ -644,7 +644,7 @@
 
     loadConfig().then(refreshBackendStatus);
     setInterval(refreshBackendStatus, 15000);
-    add("bot", "Ready. Ask a dermatology question with descriptors and location.", `Session: ${getSessionId()}`);
+    add("bot", "Hi, I am ready. Please describe what you are seeing on your skin and where it is located.", `Session: ${getSessionId()}`);
   </script>
 </body>
 </html>

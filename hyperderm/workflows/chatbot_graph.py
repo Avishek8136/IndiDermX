@@ -360,26 +360,26 @@ def build_chatbot_workflow(
         questions: list[str] = []
 
         if not body_part:
-            questions.append("As your dermatologist, can you tell me which body area is most affected?")
+            questions.append("Which part of your body is most affected right now?")
         if not state.get("descriptors"):
-            questions.append("As your doctor, how does the lesion look: flat, scaly, raised, ring-shaped, or patchy?")
+            questions.append("How does it look: flat, scaly, raised, ring-shaped, or patchy?")
         if not state.get("symptoms"):
-            questions.append("Are you feeling itch, pain, burning, or none of these symptoms?")
+            questions.append("Do you feel itching, pain, burning, or none of these?")
         if not state.get("effects"):
-            questions.append("Has it spread, cracked, oozed, or left scars over time?")
+            questions.append("Has it spread, cracked, oozed, or left marks over time?")
 
         if "acne" in candidate_name:
             questions.extend([
                 "Are there blackheads, whiteheads, or tender bumps?"])
         elif any(term in candidate_name for term in ["tinea", "fungal", "ringworm"]):
             questions.extend([
-                "Is the rash ring-shaped with a clearer center?",
-                "Has it spread to other areas or close contacts?",
+                "Is it ring-shaped with clearer skin in the center?",
+                "Has it spread to other areas or to close contacts at home?",
             ])
         elif any(term in candidate_name for term in ["psoriasis", "eczema", "dermatitis"]):
             questions.extend([
                 "Does it come and go, or stay in the same places?",
-                "Any dry skin, scaling, or triggers like soaps or stress?",
+                "Any dry skin, scaling, or triggers like soaps, weather, or stress?",
             ])
         elif any(term in candidate_name for term in ["vitiligo", "depigmented"]):
             questions.extend([
@@ -459,9 +459,9 @@ def build_chatbot_workflow(
 
     def node_abstain_answer(state: ChatbotState) -> ChatbotState:
         message = (
-            "I do not yet have enough reliable evidence to provide a specific diagnosis. "
-            "As your dermatologist assistant, I need a few more clinical details such as lesion shape, duration, distribution, and symptoms. "
-            "If symptoms worsen, please consult a dermatologist for an in-person exam."
+            "Thanks for sharing that. I do not yet have enough reliable evidence to provide a specific diagnosis. "
+            "Please tell me a bit more about the shape, exact location, duration, spread, and symptoms (itch, pain, burning, discharge). "
+            "If this is worsening quickly, painful, or spreading, please consult a dermatologist for an in-person exam soon."
         )
         return {
             "draft_answer": message,
@@ -484,9 +484,9 @@ def build_chatbot_workflow(
         # The questions will be presented separately via suggested_questions UI element
         if abstain_reason == "round_1_intake_engagement":
             answer = (
-                "Hello! I'm your dermatology assistant. "
-                "To help me understand your skin concern better, I have a few clinical questions to guide us through a proper assessment. "
-                "Please answer the questions below to get started."
+                "Hi, I can help with this. "
+                "I will ask a few focused questions first so we can narrow it down safely. "
+                "Please answer the questions below, and then I'll give you the most likely possibilities."
             )
         else:
             answer = medgemma_service.generate_chat_answer(

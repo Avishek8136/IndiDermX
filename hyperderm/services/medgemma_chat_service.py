@@ -328,18 +328,19 @@ class MedGemmaChatService:
         ]
 
         prompt = (
-            "You are a dermatologist-style doctor agent speaking to a patient. "
+            "You are an experienced dermatologist speaking with a patient in clinic. "
             "Respond in ENGLISH only. "
+            "Sound natural, calm, and clinically practical, not robotic. "
             "Use concise plain text with exactly four sections and these labels: "
             "Probable condition:, Why this matches:, Graph evidence used:, Clinical caution:. "
+            "Keep each section short (2-4 sentences) and avoid repeating the same phrasing. "
             "In 'Why this matches', explicitly reference matched descriptors/body/symptoms/effects from neo4j_candidate_reasoning. "
             "In 'Graph evidence used', reference graph_context disease profiles and evidence rows if available. "
-            "Address the user as the patient in a professional, empathetic tone. "
+            "Address the user directly with empathetic doctor-style language (for example: 'Thanks, that helps' or 'From what you've described'). "
             "If evidence is weak, explicitly say what additional patient details are needed. "
             "If candidate_list is empty, still provide a provisional model-only differential in 'Probable condition' based on user_message and visual_features, "
             "and explicitly state that Neo4j had no matching candidate in 'Graph evidence used'. "
-            "If candidate_list is empty and suggested_questions are provided, ask these questions conversationally in 'Probable condition' section "
-            "to help the patient describe their symptoms more clearly (e.g., 'To help me understand better, could you tell me...'). "
+            "If candidate_list is empty and suggested_questions are provided, include 1-2 of those questions conversationally in 'Clinical caution' section. "
             "Do not invent details. Do not mention unsupported body parts. Do not claim certainty.\n\n"
             f"user_message: {user_message}\n"
             f"top_candidate: {top_candidate or {}}\n"
@@ -382,12 +383,12 @@ class MedGemmaChatService:
         # Simple, clear prompt for direct diagnosis
         simplified_prompt = (
             "You are a medical AI assistant providing differential diagnosis for a skin condition. "
-            "Based on the patient's description, provide likely conditions. "
+            "Based on the patient's description, provide likely conditions in a natural doctor-like tone. "
             "Respond with exactly these four sections:\n\n"
-            "Probable condition: List the most likely skin conditions (fungal, bacterial, inflammatory, etc.)\n"
-            "Why this matches: Explain which symptoms match each condition\n"
+            "Probable condition: Give the most likely skin conditions (fungal, inflammatory, infectious, etc.)\n"
+            "Why this matches: Explain what in the history supports these possibilities\n"
             "Graph evidence used: None - direct model assessment\n"
-            "Clinical caution: Recommend seeing a dermatologist for definitive diagnosis\n\n"
+            "Clinical caution: Include one practical next step and when to seek in-person care\n\n"
             f"Patient says: {user_message}"
         )
         if visual_features and visual_features.get("visual_atoms"):
@@ -419,11 +420,12 @@ class MedGemmaChatService:
         # Fallback to structured response with common conditions
         logger.info("Using fallback diagnosis response")
         return (
-            "Probable condition: Based on facial symptoms with itching, pain, and inflammation, "
-            "consider dermatitis (contact, atopic, or allergic), fungal infection, or bacterial infection. "
-            "Why this matches: The combination of itch, pain, and inflammation on the face suggests an inflammatory or infectious process. "
-            "Facial skin conditions commonly include dermatitis types, fungal infections (tinea faciei), or bacterial infections. "
+            "Probable condition: From your description, likely possibilities include dermatitis (irritant/allergic), fungal infection (tinea), "
+            "or another inflammatory rash. "
+            "Why this matches: The pattern, symptoms, and progression suggest an inflammatory or infectious skin process, "
+            "but there is not enough certainty yet to name one confirmed condition. "
             "Graph evidence used: None - this is a direct model assessment based on your description. "
-            "Clinical caution: These are potential differentials only. Please see a dermatologist for proper examination, lab tests, and confirmed diagnosis. "
+            "Clinical caution: Please avoid scratching, keep the area clean and dry, and arrange an in-person dermatology exam, "
+            "especially if it is spreading, painful, oozing, or not improving. "
             "This is decision support only and not a confirmed medical diagnosis."
         )
