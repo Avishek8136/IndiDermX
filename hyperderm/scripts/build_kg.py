@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import time
 from pathlib import Path
 from tqdm import tqdm
 
@@ -69,6 +70,13 @@ def resolve_image_path(dataset_csv_path: str | None, image_name: str | None) -> 
     return str(candidate_paths[-1])
 
 
+def chunked(values: list[dict] | list[str], size: int):
+    if size <= 0:
+        size = 25
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
+
+
 def main() -> None:
     backup = JsonlBackupStore(settings.backup_dir)
     backup.write_schema_version(schema_version="1.0.0", pipeline_version="0.2.0")
@@ -110,103 +118,111 @@ def main() -> None:
         graph_row_seen: set[tuple[str, str, str, tuple[str, ...], tuple[str, ...]]] = set()
 
         total_rows = len(raw_rows)
+        batch_size = max(int(settings.build_batch_size), 1)
+        batch_pause = max(float(settings.build_batch_pause_seconds), 0.0)
         print(f"Loaded {total_rows} rows from dataset chunk (resume offset: {start_index}).")
+        print(f"Batch processing enabled: batch_size={batch_size}, batch_pause_seconds={batch_pause}")
 
         api_bar = tqdm(total=total_rows, desc="API calls", unit="row", position=0)
         neo4j_bar = tqdm(total=total_rows, desc="Neo4j updates", unit="row", position=1)
         try:
-            for idx, raw in enumerate(raw_rows, start=start_index + 1):
-                row = sanitize_case_row(raw)
-                assert_privacy_safe(row)
+            row_index = start_index
+            for batch_no, row_batch in enumerate(chunked(raw_rows, batch_size), start=1):
+                print(f"Processing row batch {batch_no}: size={len(row_batch)}")
+                for raw in row_batch:
+                    row_index += 1
+                    idx = row_index
+                    row = sanitize_case_row(raw)
+                    assert_privacy_safe(row)
 
-                disease = normalize_label(row.get("disease_label") or row.get("disease"), "Unknown Disease")
-                main_class = normalize_label(row.get("main_class"), "Other")
-                sub_class = normalize_label(row.get("sub_class"), "Unspecified")
-                morphologies = split_csv_value(row.get("descriptors"))
-                body_regions = split_csv_value(row.get("body_part"))
-                image_name = normalize_label(row.get("image_name") or row.get("imagename"), "")
-                image_path = resolve_image_path(settings.dataset_csv_path, image_name)
+                    disease = normalize_label(row.get("disease_label") or row.get("disease"), "Unknown Disease")
+                    main_class = normalize_label(row.get("main_class"), "Other")
+                    sub_class = normalize_label(row.get("sub_class"), "Unspecified")
+                    morphologies = split_csv_value(row.get("descriptors"))
+                    body_regions = split_csv_value(row.get("body_part"))
+                    image_name = normalize_label(row.get("image_name") or row.get("imagename"), "")
+                    image_path = resolve_image_path(settings.dataset_csv_path, image_name)
 
-                diseases.add(disease)
+                    diseases.add(disease)
 
                 # Step 1: external model/API call for visual feature extraction.
                 # Reuse features for repeated disease+morphology signatures to speed up full builds.
-                cache_key = (disease.lower(), tuple(sorted(part.lower() for part in morphologies)))
-                visual_features = visual_cache.get(cache_key)
-                if visual_features is None:
-                    try:
-                        visual_features = extract_visual_features(
-                            image_path=image_path,
-                            descriptors=morphologies,
-                            disease_name=disease,
-                        )
-                    except Exception as error:  # noqa: BLE001
-                        raise RuntimeError(
-                            f"Feature extraction failed at row={idx}, disease='{disease}', image='{image_name}'"
-                        ) from error
-                    visual_cache[cache_key] = visual_features
-                api_bar.update(1)
+                    cache_key = (disease.lower(), tuple(sorted(part.lower() for part in morphologies)))
+                    visual_features = visual_cache.get(cache_key)
+                    if visual_features is None:
+                        try:
+                            visual_features = extract_visual_features(
+                                image_path=image_path,
+                                descriptors=morphologies,
+                                disease_name=disease,
+                            )
+                        except Exception as error:  # noqa: BLE001
+                            raise RuntimeError(
+                                f"Feature extraction failed at row={idx}, disease='{disease}', image='{image_name}'"
+                            ) from error
+                        visual_cache[cache_key] = visual_features
+                    api_bar.update(1)
 
-                if visual_features.get("extraction_status") != "success":
-                    backup.append(
-                        backup.gap_audit,
-                        {
-                            "gapType": "visual_feature_extraction",
-                            "row": idx,
-                            "disease": disease,
-                            "descriptors": morphologies,
-                            "status": visual_features.get("extraction_status", "unknown"),
-                            "errorCode": visual_features.get("extraction_error_code", "unknown"),
-                            "errorDetail": visual_features.get("extraction_error_detail", ""),
-                        },
-                    )
+                    if visual_features.get("extraction_status") != "success":
+                        backup.append(
+                            backup.gap_audit,
+                            {
+                                "gapType": "visual_feature_extraction",
+                                "row": idx,
+                                "disease": disease,
+                                "descriptors": morphologies,
+                                "status": visual_features.get("extraction_status", "unknown"),
+                                "errorCode": visual_features.get("extraction_error_code", "unknown"),
+                                "errorDetail": visual_features.get("extraction_error_detail", ""),
+                            },
+                        )
 
                 # Step 2: only after API success, persist unique graph rows into Neo4j/backups.
-                graph_key = (
-                    disease.lower(),
-                    main_class.lower(),
-                    sub_class.lower(),
-                    tuple(sorted(part.lower() for part in morphologies)),
-                    tuple(sorted(part.lower() for part in body_regions)),
-                )
-                if graph_key not in graph_row_seen:
-                    graph_row_seen.add(graph_key)
+                    graph_key = (
+                        disease.lower(),
+                        main_class.lower(),
+                        sub_class.lower(),
+                        tuple(sorted(part.lower() for part in morphologies)),
+                        tuple(sorted(part.lower() for part in body_regions)),
+                    )
+                    if graph_key not in graph_row_seen:
+                        graph_row_seen.add(graph_key)
 
-                    store.upsert_disease_hierarchy(
-                        {
-                            "main_class": main_class,
-                            "sub_class": sub_class,
-                            "disease": disease,
-                            "morphologies": morphologies,
-                            "body_regions": body_regions,
-                        }
-                    )
-                    store.upsert_visual_feature(
-                        {
-                            "disease": disease,
-                            "feature_id": visual_features["feature_id"],
-                            "feature_natural_key": visual_features["feature_natural_key"],
-                            "mu_ref": visual_features["mu_ref"],
-                            "kappa": visual_features["kappa"],
-                            "descriptor_signature": visual_features["descriptor_signature"],
-                            "descriptor_count": visual_features["descriptor_count"],
-                            "condition_name": visual_features["condition_name"],
-                            "condition_key": visual_features["condition_key"],
-                            "morphology_summary": visual_features["morphology_summary"],
-                            "extracted_by": visual_features["extracted_by"],
-                            "extraction_status": visual_features["extraction_status"],
-                            "extraction_error_code": visual_features["extraction_error_code"],
-                        }
-                    )
-                    store.upsert_visual_atoms(
-                        {
-                            "feature_natural_key": visual_features["feature_natural_key"],
-                            "atoms": visual_features["descriptor_tokens"],
-                        }
-                    )
-                    feature_upserts += 1
+                        store.upsert_disease_hierarchy(
+                            {
+                                "main_class": main_class,
+                                "sub_class": sub_class,
+                                "disease": disease,
+                                "morphologies": morphologies,
+                                "body_regions": body_regions,
+                            }
+                        )
+                        store.upsert_visual_feature(
+                            {
+                                "disease": disease,
+                                "feature_id": visual_features["feature_id"],
+                                "feature_natural_key": visual_features["feature_natural_key"],
+                                "mu_ref": visual_features["mu_ref"],
+                                "kappa": visual_features["kappa"],
+                                "descriptor_signature": visual_features["descriptor_signature"],
+                                "descriptor_count": visual_features["descriptor_count"],
+                                "condition_name": visual_features["condition_name"],
+                                "condition_key": visual_features["condition_key"],
+                                "morphology_summary": visual_features["morphology_summary"],
+                                "extracted_by": visual_features["extracted_by"],
+                                "extraction_status": visual_features["extraction_status"],
+                                "extraction_error_code": visual_features["extraction_error_code"],
+                            }
+                        )
+                        store.upsert_visual_atoms(
+                            {
+                                "feature_natural_key": visual_features["feature_natural_key"],
+                                "atoms": visual_features["descriptor_tokens"],
+                            }
+                        )
+                        feature_upserts += 1
 
-                    backup.append(
+                        backup.append(
                         backup.kg_snapshot,
                         {
                             "nodeType": "Disease",
@@ -222,9 +238,9 @@ def main() -> None:
                         },
                     )
 
-                    hierarchy_upserts += 1
+                        hierarchy_upserts += 1
 
-                    backup.append(
+                        backup.append(
                         backup.kg_snapshot,
                         {
                             "nodeType": "VisualFeaturePrototype",
@@ -245,22 +261,25 @@ def main() -> None:
                             "schemaVersion": "1.0.0",
                         },
                     )
-                    for atom in visual_features["descriptor_tokens"]:
-                        backup.append(
-                            backup.kg_snapshot,
-                            {
-                                "nodeType": "VisualAtom",
-                                "nodeId": f"visual_atom:{atom}",
-                                "properties": {
-                                    "featureNaturalKey": visual_features["feature_natural_key"],
-                                    "atom": atom,
+                        for atom in visual_features["descriptor_tokens"]:
+                            backup.append(
+                                backup.kg_snapshot,
+                                {
+                                    "nodeType": "VisualAtom",
+                                    "nodeId": f"visual_atom:{atom}",
+                                    "properties": {
+                                        "featureNaturalKey": visual_features["feature_natural_key"],
+                                        "atom": atom,
+                                    },
+                                    "schemaVersion": "1.0.0",
                                 },
-                                "schemaVersion": "1.0.0",
-                            },
-                        )
+                            )
 
-                progress_file.write_text(json.dumps({"last_completed_row": idx}), encoding="utf-8")
-                neo4j_bar.update(1)
+                    progress_file.write_text(json.dumps({"last_completed_row": idx}), encoding="utf-8")
+                    neo4j_bar.update(1)
+
+                if batch_pause > 0:
+                    time.sleep(batch_pause)
         finally:
             api_bar.close()
             neo4j_bar.close()
@@ -268,120 +287,160 @@ def main() -> None:
         sorted_diseases = sorted(diseases)
         print(f"Unique diseases discovered: {len(sorted_diseases)}")
 
-        for disease in tqdm(sorted_diseases, desc="Enriching evidence", unit="disease"):
-            try:
-                evidence_rows = evidence_service.collect_for_disease(disease)
-            except Exception as error:  # noqa: BLE001
-                evidence_rows = []
-                backup.append(
-                    backup.gap_audit,
-                    {
-                        "gapType": "evidence_collection",
-                        "disease": disease,
-                        "status": "failed",
-                        "errorCode": "external_api_error",
-                        "errorDetail": str(error),
-                    },
-                )
-            for evidence in evidence_rows:
-                item = {
-                    "disease": disease,
-                    "source": evidence.get("source", "Unknown"),
-                    "evidence_id": evidence.get("evidence_id", ""),
-                    "title": evidence.get("title", ""),
-                    "journal": evidence.get("journal", ""),
-                    "pubdate": evidence.get("pubdate", ""),
-                    "doi": evidence.get("doi", ""),
-                }
-                store.upsert_evidence(item)
-                backup.append(backup.evidence_cards, item)
-                evidence_upserts += 1
-
-            wiki_summary = literature_client.fetch_wikipedia_summary(disease)
-            if not wiki_summary:
-                backup.append(
-                    backup.gap_audit,
-                    {
-                        "gapType": "wikipedia_summary",
-                        "disease": disease,
-                        "status": "empty",
-                        "errorCode": "no_content",
-                        "errorDetail": "Wikipedia summary returned empty string",
-                    },
-                )
-            context_parts = [wiki_summary]
-            for evidence in evidence_rows[:5]:
-                title = str(evidence.get("title", "")).strip()
-                if title:
-                    context_parts.append(title)
-            context_text = "\n".join(part for part in context_parts if part)
-
-            generated = symptom_effect_service.generate(disease_name=disease, context_text=context_text)
-            symptoms = [normalize_label(token).lower() for token in generated.get("symptoms", []) if normalize_label(token)]
-            effects = [normalize_label(token).lower() for token in generated.get("effects", []) if normalize_label(token)]
-
-            if not symptoms and not effects:
-                # Ensure we still have minimal atomic nodes for downstream diagnosis graph.
-                fallback_generated = symptom_effect_service.generate(disease_name=disease, context_text="")
-                symptoms = [
-                    normalize_label(token).lower()
-                    for token in fallback_generated.get("symptoms", [])
-                    if normalize_label(token)
-                ]
-                effects = [
-                    normalize_label(token).lower()
-                    for token in fallback_generated.get("effects", [])
-                    if normalize_label(token)
-                ]
-            generation_mode = generated.get("generation_mode", "unknown")
-            if not generation_mode.startswith("bytez"):
-                backup.append(
-                    backup.gap_audit,
-                    {
-                        "gapType": "symptom_effect_generation",
-                        "disease": disease,
-                        "status": "degraded",
-                        "errorCode": "bytez_or_context_unavailable",
-                        "errorDetail": f"generation_mode={generation_mode}",
-                    },
-                )
-            store.upsert_symptoms_effects(
-                {
-                    "disease": disease,
-                    "symptoms": symptoms,
-                    "effects": effects,
-                }
-            )
-            symptom_effect_upserts += len(symptoms) + len(effects)
-
-            for symptom in symptoms:
-                backup.append(
-                    backup.kg_snapshot,
-                    {
-                        "nodeType": "Symptom",
-                        "nodeId": f"symptom:{symptom}",
-                        "properties": {
+        for disease_batch_no, disease_batch in enumerate(chunked(sorted_diseases, batch_size), start=1):
+            print(f"Processing disease batch {disease_batch_no}: size={len(disease_batch)}")
+            for disease in tqdm(disease_batch, desc="Enriching evidence", unit="disease"):
+                try:
+                    evidence_rows = evidence_service.collect_for_disease(disease)
+                except Exception as error:  # noqa: BLE001
+                    evidence_rows = []
+                    backup.append(
+                        backup.gap_audit,
+                        {
+                            "gapType": "evidence_collection",
                             "disease": disease,
-                            "name": symptom,
-                            "source": "wikipedia_plus_bytez",
+                            "status": "failed",
+                            "errorCode": "external_api_error",
+                            "errorDetail": str(error),
                         },
-                        "schemaVersion": "1.0.0",
-                    },
-                )
-            for effect in effects:
-                backup.append(
-                    backup.kg_snapshot,
-                    {
-                        "nodeType": "Effect",
-                        "nodeId": f"effect:{effect}",
-                        "properties": {
+                    )
+                for evidence in evidence_rows:
+                    item = {
+                        "disease": disease,
+                        "source": evidence.get("source", "Unknown"),
+                        "evidence_id": evidence.get("evidence_id", ""),
+                        "title": evidence.get("title", ""),
+                        "journal": evidence.get("journal", ""),
+                        "pubdate": evidence.get("pubdate", ""),
+                        "doi": evidence.get("doi", ""),
+                    }
+                    store.upsert_evidence(item)
+                    backup.append(backup.evidence_cards, item)
+                    evidence_upserts += 1
+
+                wiki_summary = literature_client.fetch_wikipedia_summary(disease)
+                if not wiki_summary:
+                    backup.append(
+                        backup.gap_audit,
+                        {
+                            "gapType": "wikipedia_summary",
                             "disease": disease,
-                            "name": effect,
-                            "source": "wikipedia_plus_bytez",
+                            "status": "empty",
+                            "errorCode": "no_content",
+                            "errorDetail": "Wikipedia summary returned empty string",
                         },
-                        "schemaVersion": "1.0.0",
-                    },
+                    )
+                context_parts = [wiki_summary]
+                for evidence in evidence_rows[:5]:
+                    title = str(evidence.get("title", "")).strip()
+                    if title:
+                        context_parts.append(title)
+                context_text = "\n".join(part for part in context_parts if part)
+
+                generated = symptom_effect_service.generate(
+                    disease_name=disease,
+                    context_text=context_text,
+                    provider_mode="bytez_only",
                 )
+                generation_mode = str(generated.get("generation_mode", "unknown"))
+                symptoms = [normalize_label(token).lower() for token in generated.get("symptoms", []) if normalize_label(token)]
+                effects = [normalize_label(token).lower() for token in generated.get("effects", []) if normalize_label(token)]
+
+                if not symptoms and not effects:
+                    # Ensure we still have minimal atomic nodes for downstream diagnosis graph.
+                    fallback_generated = symptom_effect_service.generate(
+                        disease_name=disease,
+                        context_text="",
+                        provider_mode="bytez_only",
+                    )
+                    fallback_mode = str(fallback_generated.get("generation_mode", "unknown"))
+                    symptoms = [
+                        normalize_label(token).lower()
+                        for token in fallback_generated.get("symptoms", [])
+                        if normalize_label(token)
+                    ]
+                    effects = [
+                        normalize_label(token).lower()
+                        for token in fallback_generated.get("effects", [])
+                        if normalize_label(token)
+                    ]
+
+                    # Prefer provider-backed generation mode for provenance when fallback call returns data.
+                    if fallback_mode.startswith("hf") or fallback_mode.startswith("bytez"):
+                        generation_mode = fallback_mode
+
+                model_generated = generation_mode.startswith("hf") or generation_mode.startswith("bytez")
+
+                if not model_generated:
+                    backup.append(
+                        backup.gap_audit,
+                        {
+                            "gapType": "symptom_effect_generation",
+                            "disease": disease,
+                            "status": "skipped_non_model_output",
+                            "errorCode": "model_generation_required",
+                            "errorDetail": f"generation_mode={generation_mode}",
+                        },
+                    )
+                    continue
+
+                if not generation_mode.startswith("bytez"):
+                    backup.append(
+                        backup.gap_audit,
+                        {
+                            "gapType": "symptom_effect_generation",
+                            "disease": disease,
+                            "status": "degraded",
+                            "errorCode": "bytez_or_context_unavailable",
+                            "errorDetail": f"generation_mode={generation_mode}",
+                        },
+                    )
+                store.upsert_symptoms_effects(
+                    {
+                        "disease": disease,
+                        "symptoms": symptoms,
+                        "effects": effects,
+                    }
+                )
+                symptom_effect_upserts += len(symptoms) + len(effects)
+
+                source_label = (
+                    "wikipedia_plus_bytez"
+                    if generation_mode.startswith("bytez")
+                    else "wikipedia_plus_fallback"
+                )
+
+                for symptom in symptoms:
+                    backup.append(
+                        backup.kg_snapshot,
+                        {
+                            "nodeType": "Symptom",
+                            "nodeId": f"symptom:{symptom}",
+                            "properties": {
+                                "disease": disease,
+                                "name": symptom,
+                                "source": source_label,
+                            },
+                            "schemaVersion": "1.0.0",
+                        },
+                    )
+                for effect in effects:
+                    backup.append(
+                        backup.kg_snapshot,
+                        {
+                            "nodeType": "Effect",
+                            "nodeId": f"effect:{effect}",
+                            "properties": {
+                                "disease": disease,
+                                "name": effect,
+                                "source": source_label,
+                            },
+                            "schemaVersion": "1.0.0",
+                        },
+                    )
+
+            if batch_pause > 0:
+                time.sleep(batch_pause)
 
         print("Knowledge graph build complete.")
         print(f"Hierarchy rows upserted: {hierarchy_upserts}")

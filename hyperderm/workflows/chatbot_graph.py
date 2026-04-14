@@ -22,6 +22,8 @@ class ChatbotState(TypedDict, total=False):
     memory_slots: dict[str, Any]
     recent_messages: list[dict[str, Any]]
     greeting_intent: bool
+    urgent_intent: bool
+    urgent_reasons: list[str]
     current_turn_signal_count: int
     conversation_round: int
     force_diagnosis: bool
@@ -40,6 +42,7 @@ class ChatbotState(TypedDict, total=False):
     supporting_evidence: list[dict[str, Any]]
     should_abstain: bool
     abstain_reason: str
+    dialogue_state: dict[str, Any]
     suggested_questions: list[str]
     memory_summary: str
     draft_answer: str
@@ -111,6 +114,87 @@ def build_chatbot_workflow(
         }
         return normalized in minimal
 
+    def _detect_urgent_red_flags(message: str) -> list[str]:
+        normalized = (message or "").strip().lower()
+        mappings = {
+            "worsen": ["worsening", "worsened", "getting worse", "worse quickly"],
+            "spread": ["spreading", "spread fast", "spreading fast", "spread rapidly"],
+            "pain": ["severe pain", "very painful", "intense pain"],
+            "bleed": ["bleeding", "bleeds", "blood"],
+            "fever": ["fever", "temperature", "chills"],
+            "ooze": ["oozing", "draining", "pus", "discharge"],
+        }
+        hits: list[str] = []
+        for label, phrases in mappings.items():
+            if any(phrase in normalized for phrase in phrases):
+                hits.append(label)
+        return hits
+
+    def _estimate_current_signal_count(message: str, image_path: str | None) -> int:
+        text = (message or "").strip().lower()
+        tokens = re.findall(r"[a-z]+", text)
+        signal_terms = {
+            "itch", "itchy", "itching", "pain", "burning", "rash", "patch", "patches",
+            "spot", "spots", "ring", "ringed", "ring-shaped", "white", "red", "scaly",
+            "raised", "flat", "dry", "oozing", "spreading", "spread", "neck", "face",
+            "arm", "leg", "scalp", "chest", "back", "groin"
+        }
+        count = sum(1 for token in tokens if token in signal_terms)
+        if image_path:
+            count += 1
+        return count
+
+    def _build_dialogue_state(state: ChatbotState) -> dict[str, Any]:
+        descriptors = list(state.get("descriptors", []))
+        body_part = str(state.get("body_part", "") or "").strip().lower()
+        symptoms = list(state.get("symptoms", []))
+        effects = list(state.get("effects", []))
+        image_path = state.get("image_path")
+        dialogue_state = {
+            "known_location": body_part,
+            "known_descriptors": descriptors,
+            "known_symptoms": symptoms,
+            "known_effects": effects,
+            "image_present": bool(image_path),
+            "urgent_reasons": list(state.get("urgent_reasons", [])),
+            "current_turn_signal_count": int(state.get("current_turn_signal_count", 0) or 0),
+            "missing_location": not bool(body_part),
+            "missing_descriptors": not bool(descriptors),
+            "missing_symptoms": not bool(symptoms),
+            "missing_effects": not bool(effects),
+        }
+        return dialogue_state
+
+    def _build_next_question(state: ChatbotState) -> str:
+        dialogue_state = state.get("dialogue_state", {})
+        selected = state.get("selected_candidates", [])
+        top_name = str(selected[0].get("disease", "")).lower() if selected else ""
+
+        if dialogue_state.get("missing_location"):
+            return "Which part of your body is affected?"
+
+        if dialogue_state.get("missing_descriptors"):
+            if any(term in top_name for term in ["tinea", "fungal", "ringworm"]):
+                return "Do the patches look ring-shaped or scaly, and do they get more noticeable after sweating or in sunlight?"
+            if any(term in top_name for term in ["vitiligo", "depigmented"]):
+                return "Are the patches sharply bordered and purely white, or just lighter than the surrounding skin?"
+            if any(term in top_name for term in ["psoriasis", "eczema", "dermatitis"]):
+                return "Do they look dry, scaly, or irritated, and do soaps, weather, or stress make them worse?"
+            if "acne" in top_name:
+                return "Are there bumps, pimples, or blackheads/whiteheads?"
+            return "How would you describe the skin changes: flat, scaly, ring-shaped, raised, or patchy?"
+
+        if dialogue_state.get("missing_symptoms"):
+            return "Is it mainly itchy, painful, burning, or not very symptomatic?"
+
+        if dialogue_state.get("missing_effects"):
+            return "Has it been spreading, cracking, oozing, or changing over time?"
+
+        if not dialogue_state.get("image_present"):
+            return "If you can, upload a clear photo so I can compare the visual pattern with your description."
+
+        return "Could you tell me when it started and whether anything makes it better or worse?"
+
     def node_supervisor_plan(state: ChatbotState) -> ChatbotState:
         session_id = state.get("session_id") or "default"
         user_message = str(state.get("user_message", ""))
@@ -120,6 +204,9 @@ def build_chatbot_workflow(
         conversation_round = prior_user_turns + 1
         force_diagnosis = conversation_round >= 3
         greeting_intent = _is_greeting_or_small_talk(user_message)
+        urgent_reasons = _detect_urgent_red_flags(user_message)
+        image_path = state.get("image_path") or ""
+        current_turn_signal_count = _estimate_current_signal_count(user_message, image_path or None)
 
         slots: dict[str, Any] = {
             "descriptors": [],
@@ -157,6 +244,9 @@ def build_chatbot_workflow(
             "memory_summary": memory_summary,
             "recent_messages": recent,
             "greeting_intent": greeting_intent,
+            "urgent_intent": bool(urgent_reasons),
+            "urgent_reasons": urgent_reasons,
+            "current_turn_signal_count": current_turn_signal_count,
             "memory_slots": slots,
             "conversation_round": conversation_round,
             "force_diagnosis": force_diagnosis,
@@ -167,6 +257,48 @@ def build_chatbot_workflow(
                     "agent": "supervisor_agent",
                     "conversation_round": conversation_round,
                     "force_diagnosis": force_diagnosis,
+                    "urgent_intent": bool(urgent_reasons),
+                    "greeting_intent": greeting_intent,
+                },
+            ),
+        }
+
+    def _route_after_plan(state: ChatbotState) -> str:
+        if state.get("urgent_intent"):
+            return "urgent"
+        if state.get("greeting_intent") and int(state.get("current_turn_signal_count", 0) or 0) == 0 and not state.get("image_path"):
+            return "greeting"
+        return "continue"
+
+    def node_greeting_response(state: ChatbotState) -> ChatbotState:
+        return {
+            "draft_answer": (
+                "Hello, I can help with this. Please describe the skin concern, where it is, how it looks, "
+                "and whether it itches, hurts, or is spreading. If you already uploaded a photo, I will use that too."
+            ),
+            "tool_trace": _append_trace(
+                state,
+                {
+                    "step": "greeting_response",
+                    "agent": "supervisor_agent",
+                    "image_present": bool(state.get("image_path")),
+                },
+            ),
+        }
+
+    def node_urgent_escalation(state: ChatbotState) -> ChatbotState:
+        reasons = state.get("urgent_reasons", [])
+        reason_text = ", ".join(reasons) if reasons else "urgent symptoms"
+        return {
+            "draft_answer": (
+                f"This sounds urgent because of {reason_text}. Please seek in-person medical care today or go to urgent care if it is worsening quickly, spreading fast, bleeding, or very painful."
+            ),
+            "tool_trace": _append_trace(
+                state,
+                {
+                    "step": "urgent_escalation",
+                    "agent": "medical_safety_agent",
+                    "reasons": reasons,
                 },
             ),
         }
@@ -195,12 +327,27 @@ def build_chatbot_workflow(
             + (1 if extracted.get("body_part", "") else 0)
             + len(visual_features.get("descriptor_tokens", []))
         )
+        dialogue_state = {
+            "known_location": body_part,
+            "known_descriptors": merged_descriptors,
+            "known_symptoms": merged_symptoms,
+            "known_effects": merged_effects,
+            "image_present": bool(image_path),
+            "visual_features": visual_features,
+            "urgent_reasons": state.get("urgent_reasons", []),
+            "current_turn_signal_count": current_turn_signal_count,
+            "missing_location": not bool(body_part),
+            "missing_descriptors": not bool(merged_descriptors),
+            "missing_symptoms": not bool(merged_symptoms),
+            "missing_effects": not bool(merged_effects),
+        }
         return {
             "descriptors": merged_descriptors,
             "body_part": body_part,
             "symptoms": merged_symptoms,
             "effects": merged_effects,
             "current_turn_signal_count": current_turn_signal_count,
+            "dialogue_state": dialogue_state,
             "extraction_source": extracted.get("source", "unknown"),
             "visual_features": visual_features,
             "tool_trace": _append_trace(
@@ -386,74 +533,31 @@ def build_chatbot_workflow(
                 ),
             }
 
-        selected = state.get("selected_candidates", [])
-        top = selected[0] if selected else {}
-        body_part = (state.get("body_part") or "").lower()
-        candidate_name = str(top.get("disease", "")).lower()
-        questions: list[str] = []
-        
-        # Extract previously asked questions from conversation history
-        recent_messages = state.get("recent_messages", [])
-        previously_asked = set()
-        for msg in recent_messages:
-            if str(msg.get("role", "")).lower() == "assistant":
-                content = str(msg.get("content", "")).lower()
-                # Mark topics that have been discussed
-                if "body" in content or "location" in content or "where" in content:
-                    previously_asked.add("location")
-                if "descriptor" in content or "look" in content or "appearance" in content or "shape" in content:
-                    previously_asked.add("appearance")
-                if "symptom" in content or "itch" in content or "pain" in content or "burning" in content:
-                    previously_asked.add("symptom")
-                if "spread" in content or "mark" in content or "ooz" in content or "crack" in content:
-                    previously_asked.add("progression")
+        if state.get("urgent_intent", False):
+            return {
+                "suggested_questions": [],
+                "tool_trace": _append_trace(
+                    state,
+                    {
+                        "step": "generate_patient_questions",
+                        "agent": "supervisor_agent",
+                        "question_count": 0,
+                        "suppressed_by_urgent_escalation": True,
+                    },
+                ),
+            }
 
-        # Only add questions for topics not yet discussed
-        if "location" not in previously_asked and not body_part:
-            questions.append("Which part of your body is most affected right now?")
-        if "appearance" not in previously_asked and not state.get("descriptors"):
-            questions.append("How does it look: flat, scaly, raised, ring-shaped, or patchy?")
-        if "symptom" not in previously_asked and not state.get("symptoms"):
-            questions.append("Do you feel itching, pain, burning, or none of these?")
-        if "progression" not in previously_asked and not state.get("effects"):
-            questions.append("Has it spread, cracked, oozed, or left marks over time?")
-
-        if "acne" in candidate_name:
-            questions.extend([
-                "Are there blackheads, whiteheads, or tender bumps?"])
-        elif any(term in candidate_name for term in ["tinea", "fungal", "ringworm"]):
-            questions.extend([
-                "Is it ring-shaped with clearer skin in the center?",
-                "Has it spread to other areas or to close contacts at home?",
-            ])
-        elif any(term in candidate_name for term in ["psoriasis", "eczema", "dermatitis"]):
-            questions.extend([
-                "Does it come and go, or stay in the same places?",
-                "Any dry skin, scaling, or triggers like soaps, weather, or stress?",
-            ])
-        elif any(term in candidate_name for term in ["vitiligo", "depigmented"]):
-            questions.extend([
-                "Are the patches completely white or just lighter than the surrounding skin?",
-                "Do the patches have sharp borders or hair color change?",
-            ])
-
-        # de-duplicate and keep patient-answerable concise questions
-        filtered: list[str] = []
-        seen = set()
-        for question in questions:
-            clean = question.strip()
-            if clean and clean not in seen:
-                seen.add(clean)
-                filtered.append(clean)
+        question = _build_next_question(state)
+        filtered = [question] if question else []
 
         return {
-            "suggested_questions": filtered[:3],  # Reduced from 5 to 3 for focus
+            "suggested_questions": filtered[:1],
             "tool_trace": _append_trace(
                 state,
                 {
                     "step": "generate_patient_questions",
                     "agent": "supervisor_agent",
-                    "question_count": len(filtered[:3]),
+                    "question_count": len(filtered[:1]),
                 },
             ),
         }
@@ -475,6 +579,9 @@ def build_chatbot_workflow(
             # Pure greeting/small-talk should never trigger diagnosis.
             should_abstain = False
             reason = "greeting_intake_engagement"
+        elif state.get("urgent_intent", False):
+            should_abstain = False
+            reason = "urgent_escalation"
         elif current_turn_signal_count < 2 and evidence_count == 0:
             # Hard floor: without minimum fresh signal and evidence, ask for more info.
             should_abstain = True
@@ -526,11 +633,23 @@ def build_chatbot_workflow(
 
     def node_abstain_answer(state: ChatbotState) -> ChatbotState:
         reason = str(state.get("abstain_reason", "low_confidence_or_no_signal"))
+        dialogue_state = state.get("dialogue_state", {})
         if reason == "insufficient_signal_or_evidence":
+            if dialogue_state.get("image_present"):
+                message = (
+                    "I can see you uploaded a photo, but I still need a bit more context before I can narrow this safely. "
+                    "Please tell me the exact location, how it looks, and whether it is itchy, painful, or spreading."
+                )
+            else:
+                message = (
+                    "I need a little more information before suggesting a likely condition. "
+                    "Please share where it is located, how it looks (patchy/scaly/ring-shaped), and what you feel (itch, pain, burning). "
+                    "If possible, upload a clear photo so I can help more accurately."
+                )
+        elif reason == "urgent_escalation":
             message = (
-                "I need a little more information before suggesting a likely condition. "
-                "Please share where it is located, how it looks (patchy/scaly/ring-shaped), and what you feel (itch, pain, burning). "
-                "If possible, upload a clear photo so I can help more accurately."
+                "This sounds urgent. If the rash is worsening quickly, spreading fast, bleeding, or very painful, "
+                "please seek in-person medical care today or go to urgent care. I do not want to delay treatment."
             )
         else:
             message = (
@@ -554,6 +673,8 @@ def build_chatbot_workflow(
         selected = state.get("selected_candidates", [])
         top_candidate = selected[0] if selected else None
         abstain_reason = state.get("abstain_reason", "")
+        dialogue_state = state.get("dialogue_state", {})
+        image_present = bool(dialogue_state.get("image_present", False))
         
         # On round 1 intake engagement, generate a simple welcome message
         # The questions will be presented separately via suggested_questions UI element
@@ -562,6 +683,11 @@ def build_chatbot_workflow(
                 "Hello, I can help with this. "
                 "Please describe your skin concern (where it is, how it looks, and symptoms like itch or pain), "
                 "or upload a photo so I can guide you safely."
+            )
+        elif abstain_reason == "urgent_escalation":
+            answer = (
+                "This sounds urgent. If it is worsening quickly, spreading fast, bleeding, or very painful, "
+                "please seek in-person medical care today. I do not want to delay treatment."
             )
         else:
             answer = medgemma_service.generate_chat_answer(
@@ -573,6 +699,8 @@ def build_chatbot_workflow(
                 graph_context=state.get("graph_context", []),
                 memory_summary=state.get("memory_summary", ""),
                 recent_messages=state.get("recent_messages", []),
+                dialogue_state=dialogue_state,
+                image_present=image_present,
                 suggested_questions=state.get("suggested_questions", []),
             )
 
@@ -683,6 +811,8 @@ def build_chatbot_workflow(
 
     graph = StateGraph(ChatbotState)
     graph.add_node("supervisor_plan", node_supervisor_plan)
+    graph.add_node("greeting_response", node_greeting_response)
+    graph.add_node("urgent_escalation", node_urgent_escalation)
     graph.add_node("extract_query", node_extract_query)
     graph.add_node("diagnose_neo4j", node_diagnose_neo4j)
     graph.add_node("diagnose_fallback", node_diagnose_fallback)
@@ -696,7 +826,17 @@ def build_chatbot_workflow(
     graph.add_node("finalize", node_finalize)
 
     graph.set_entry_point("supervisor_plan")
-    graph.add_edge("supervisor_plan", "extract_query")
+    graph.add_conditional_edges(
+        "supervisor_plan",
+        _route_after_plan,
+        {
+            "urgent": "urgent_escalation",
+            "greeting": "greeting_response",
+            "continue": "extract_query",
+        },
+    )
+    graph.add_edge("greeting_response", "medical_safety_guard")
+    graph.add_edge("urgent_escalation", "medical_safety_guard")
     graph.add_edge("extract_query", "diagnose_neo4j")
     graph.add_conditional_edges(
         "diagnose_neo4j",

@@ -2,33 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 import re
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from bytez import Bytez
-
 from hyperderm.core.config import settings
+from hyperderm.services.model_clients import run_text_with_fallback
 
 
-def _log_bytez_call(event: dict[str, Any]) -> None:
-    log_path = Path(settings.backup_dir) / "bytez_calls.jsonl"
+def _log_model_call(event: dict[str, Any]) -> None:
+    log_path = Path(settings.backup_dir) / "model_calls.jsonl"
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         **event,
     }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as file_obj:
         file_obj.write(json.dumps(payload, ensure_ascii=True) + "\n")
-
-
-@lru_cache(maxsize=1)
-def _get_model():
-    sdk = Bytez(settings.bytez_api_key)
-    return sdk.model(settings.bytez_model)
 
 
 def _parse_json_object(output: Any) -> dict[str, Any]:
@@ -45,12 +36,12 @@ def _parse_json_object(output: Any) -> dict[str, Any]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
+
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Recover JSON if model wraps output in extra text.
     match = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not match:
         return {}
@@ -98,13 +89,13 @@ def _compact_error_code(message: str | None) -> str:
     if not message:
         return "unknown"
     lowered = message.lower()
-    if "you only have 0 open" in lowered or "rate limits" in lowered or "gpu seats" in lowered:
+    if "rate limited" in lowered or "rate limits" in lowered or "429" in lowered:
         return "seat_limit"
     if "timed out" in lowered:
         return "timeout"
     if "remotedisconnected" in lowered or "connection aborted" in lowered:
         return "network"
-    return "bytez_error"
+    return "model_error"
 
 
 def extract_visual_features(image_path: str | None, descriptors: list[str], disease_name: str | None = None) -> dict[str, Any]:
@@ -121,85 +112,44 @@ def extract_visual_features(image_path: str | None, descriptors: list[str], dise
         f"descriptors: {descriptor_tokens}"
     )
 
-    model = _get_model()
-    messages = [
-        {
-            "role": "user",
-            "content": prompt,
-        }
-    ]
+    fallback_signature = "|".join(descriptor_tokens)
+    fallback_ref = hashlib.sha256(f"{disease_ref}|{fallback_signature}".encode("utf-8")).hexdigest()[:24]
 
-    def _invoke_once():
-        # Standard Bytez model call without scale-up.
-        result = model.run(messages)
+    try:
+        output_text, source, error = run_text_with_fallback(
+            prompt,
+            timeout_seconds=settings.bytez_timeout_seconds,
+            temperature=0.2,
+            validator=lambda text: bool(_parse_json_object(text)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        output_text = ""
+        source = "bytez"
+        error = str(exc)
 
-        return result
-
-    def _invoke_with_timeout(timeout_seconds: int):
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(_invoke_once)
-        try:
-            return future.result(timeout=timeout_seconds)
-        except FuturesTimeoutError as error:
-            # Do not block waiting for a stuck worker thread.
-            future.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise TimeoutError(f"Bytez call timed out after {timeout_seconds}s") from error
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
-
-    results = None
-    last_error = None
-    for attempt in range(1, 5):
-        try:
-            results = _invoke_with_timeout(settings.bytez_timeout_seconds)
-        except Exception as error:  # noqa: BLE001
-            last_error = str(error)
-            _log_bytez_call(
-                {
-                    "status": "exception",
-                    "attempt": attempt,
-                    "model": settings.bytez_model,
-                    "image_path_ref": image_ref,
-                    "error": last_error,
-                }
-            )
-            time.sleep(min(8, 2 * attempt))
-            continue
-
-        if not results.error:
-            _log_bytez_call(
-                {
-                    "status": "success",
-                    "attempt": attempt,
-                    "model": settings.bytez_model,
-                    "image_path_ref": image_ref,
-                }
-            )
-            break
-
-        last_error = str(results.error)
-        _log_bytez_call(
+    if output_text.strip():
+        _log_model_call(
             {
-                "status": "error",
-                "attempt": attempt,
+                "status": "success",
+                "attempt": 1,
                 "model": settings.bytez_model,
+                "provider": source,
                 "image_path_ref": image_ref,
-                "error": last_error,
             }
         )
-        transient_markers = ["RemoteDisconnected", "Connection aborted", "timed out", "502", "503", "504"]
-        if any(marker in last_error for marker in transient_markers) and attempt < 4:
-            time.sleep(min(8, 2 * attempt))
-            continue
+    else:
+        _log_model_call(
+            {
+                "status": "error",
+                "attempt": 1,
+                "model": settings.bytez_model,
+                "provider": source,
+                "image_path_ref": image_ref,
+                "error": error or "empty_response",
+            }
+        )
 
-        break
-
-    if results is None or results.error:
-        # Keep ingestion moving even when Bytez has transient outages/seat blocks.
-        signature = "|".join(descriptor_tokens)
-        fallback_ref = hashlib.sha256(f"{disease_ref}|{signature}".encode("utf-8")).hexdigest()[:24]
-        error_code = _compact_error_code(last_error)
+    if not output_text.strip():
         morphology_summary = ", ".join(descriptor_tokens[:6]) if descriptor_tokens else "unknown_morphology"
         return {
             "feature_id": f"vf:{fallback_ref}",
@@ -212,13 +162,13 @@ def extract_visual_features(image_path: str | None, descriptors: list[str], dise
             "condition_name": disease_name or "Unknown Disease",
             "condition_key": f"cond:{disease_ref.replace(' ', '_')}",
             "morphology_summary": morphology_summary,
-            "extracted_by": "fallback",
+            "extracted_by": settings.bytez_model,
             "extraction_status": "fallback",
-            "extraction_error_code": error_code,
-            "extraction_error_detail": last_error or "",
+            "extraction_error_code": _compact_error_code(error),
+            "extraction_error_detail": error or "",
         }
 
-    parsed = _parse_json_object(results.output)
+    parsed = _parse_json_object(output_text)
     if not parsed:
         parsed = {
             "mu_ref": f"parsed_fallback:{hashlib.sha256(image_ref.encode('utf-8')).hexdigest()[:12]}",
@@ -232,8 +182,8 @@ def extract_visual_features(image_path: str | None, descriptors: list[str], dise
         kappa = float(raw_kappa)
     except (TypeError, ValueError):
         kappa = 10.0
-
     kappa = max(0.0, min(100.0, kappa))
+
     parsed_tokens = parsed.get("descriptor_tokens", descriptor_tokens)
     if not isinstance(parsed_tokens, list):
         parsed_tokens = descriptor_tokens

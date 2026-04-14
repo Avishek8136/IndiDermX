@@ -4,12 +4,10 @@ import json
 import logging
 import re
 import threading
-import time
 from typing import Any
 
-from bytez import Bytez
-
 from hyperderm.core.config import settings
+from hyperderm.services.model_clients import run_text_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +100,9 @@ class MedGemmaChatService:
     }
 
     def __init__(self) -> None:
-        self._sdk = Bytez(settings.bytez_api_key)
-        self._model = self._sdk.model(settings.bytez_model)
         self._request_lock = _medgemma_api_lock  # Use global lock for rate limiting
+        self._model_id = settings.bytez_model
+        self._timeout_seconds = int(settings.bytez_timeout_seconds)
 
     @staticmethod
     def _normalize_token(token: str) -> str:
@@ -162,10 +160,20 @@ class MedGemmaChatService:
         return text
 
     @staticmethod
-    def _deterministic_candidate_answer(top_candidate: dict[str, Any], evidence: list[dict[str, Any]] | None = None) -> str:
+    def _deterministic_candidate_answer(
+        top_candidate: dict[str, Any],
+        evidence: list[dict[str, Any]] | None = None,
+        image_present: bool = False,
+    ) -> str:
         disease = str(top_candidate.get("disease", "Unknown")).strip() or "Unknown"
         evidence_count = len(evidence or [])
         if evidence_count == 0:
+            if image_present:
+                return (
+                    "I can see the photo you uploaded, but I still need a bit more context before naming a specific condition. "
+                    "Please tell me where it is located, how long it has been there, and whether it is itchy, painful, or spreading. "
+                    "This is decision support only and not a confirmed medical diagnosis."
+                )
             return (
                 "I do not have enough reliable evidence yet to name a specific condition. "
                 "Please share a bit more detail about appearance, location, duration, and symptoms, "
@@ -185,11 +193,12 @@ class MedGemmaChatService:
         top_candidate: dict[str, Any] | None,
         candidates: list[dict[str, Any]] | None = None,
         evidence: list[dict[str, Any]] | None = None,
+        image_present: bool = False,
     ) -> str:
         clean = " ".join(text.strip().split())
         if not clean:
             if top_candidate:
-                return cls._deterministic_candidate_answer(top_candidate, evidence)
+                return cls._deterministic_candidate_answer(top_candidate, evidence, image_present=image_present)
             return (
                 "I could not confidently identify a condition from the available signals. "
                 "This is decision support only and not a confirmed medical diagnosis."
@@ -197,7 +206,7 @@ class MedGemmaChatService:
         # If model ignores language/style instructions and returns noisy text, fall back to deterministic wording.
         if "muhtemelen" in clean.lower() or "kuyru" in clean.lower():
             if top_candidate:
-                return cls._deterministic_candidate_answer(top_candidate, evidence)
+                return cls._deterministic_candidate_answer(top_candidate, evidence, image_present=image_present)
             return (
                 "I could not confidently identify a condition from the available signals. "
                 "Please consult a dermatologist. This is decision support only and not a confirmed medical diagnosis."
@@ -215,7 +224,7 @@ class MedGemmaChatService:
             # Guardrail: if model answer does not mention the selected top diagnosis,
             # or explicitly mentions an out-of-candidate diagnosis, use deterministic text.
             if top_name and top_name not in clean.lower():
-                return cls._deterministic_candidate_answer(top_candidate, evidence)
+                return cls._deterministic_candidate_answer(top_candidate, evidence, image_present=image_present)
 
             tokens = {
                 token.strip().lower()
@@ -226,75 +235,21 @@ class MedGemmaChatService:
                 name for name in candidate_names if name and name in clean.lower()
             }
             if not mentioned_diseases and any("onychomycosis" in token for token in tokens):
-                return cls._deterministic_candidate_answer(top_candidate, evidence)
+                return cls._deterministic_candidate_answer(top_candidate, evidence, image_present=image_present)
 
         return clean
 
     def _run_text(self, prompt: str) -> str:
-        """Call MedGemma API with rate limiting and exponential backoff retry."""
-        max_retries = 5
-        base_wait_time = 2  # seconds
-        
-        for attempt in range(max_retries):
-            # Acquire lock to ensure sequential requests (free tier: 1 request at a time)
-            with self._request_lock:
-                try:
-                    logger.debug(f"Calling MedGemma LLM API (attempt {attempt + 1}/{max_retries})")
-                    result = self._model.run([{"role": "user", "content": prompt}])
-                    
-                    if result.error:
-                        error_msg = str(result.error).lower()
-                        # Check for rate limit error (429 or "rate limited" message)
-                        if "rate limited" in error_msg or "429" in error_msg or "too many requests" in error_msg:
-                            if attempt < max_retries - 1:
-                                # Calculate exponential backoff: 2s, 4s, 8s, 16s, 32s
-                                wait_time = base_wait_time * (2 ** attempt)
-                                logger.warning(
-                                    f"MedGemma rate limited. Retrying after {wait_time}s "
-                                    f"(attempt {attempt + 1}/{max_retries})"
-                                )
-                                time.sleep(wait_time)
-                                continue  # Retry the request
-                            else:
-                                logger.error(f"MedGemma rate limited after {max_retries} retries")
-                                raise RuntimeError(str(result.error))
-                        else:
-                            logger.error(f"MedGemma returned error: {result.error}")
-                            raise RuntimeError(str(result.error))
-
-                    output = result.output
-                    if isinstance(output, dict):
-                        content = output.get("content")
-                        response = str(content) if content is not None else json.dumps(output)
-                    else:
-                        response = str(output)
-                    logger.debug(f"MedGemma response length: {len(response)} chars")
-                    return response
-                    
-                except RuntimeError:
-                    # Re-raise RuntimeError from MedGemma API failures
-                    raise
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    # Handle network/connection rate limit errors
-                    if "rate limited" in error_msg or "429" in error_msg or "too many requests" in error_msg:
-                        if attempt < max_retries - 1:
-                            wait_time = base_wait_time * (2 ** attempt)
-                            logger.warning(
-                                f"MedGemma rate limited (connection error). Retrying after {wait_time}s "
-                                f"(attempt {attempt + 1}/{max_retries})"
-                            )
-                            time.sleep(wait_time)
-                            continue  # Retry the request
-                        else:
-                            logger.error(f"MedGemma rate limited after {max_retries} retries: {str(e)}")
-                            raise
-                    else:
-                        logger.error(f"MedGemma API exception: {str(e)}")
-                        raise
-        
-        # Should not reach here, but just in case
-        raise RuntimeError("MedGemma API call failed after all retries")
+        with self._request_lock:
+            text, source, error = run_text_with_fallback(
+                prompt,
+                timeout_seconds=self._timeout_seconds,
+                temperature=0.2,
+                validator=lambda output: bool(output.strip()),
+            )
+        if not text.strip():
+            raise RuntimeError(error or "Empty response from model providers")
+        return text
 
     def extract_query_features(self, message: str) -> dict[str, Any]:
         normalized_message = self._normalize_message_text(message)
@@ -442,6 +397,8 @@ class MedGemmaChatService:
         graph_context: list[dict[str, Any]] | None = None,
         memory_summary: str = "",
         recent_messages: list[dict[str, Any]] | None = None,
+        dialogue_state: dict[str, Any] | None = None,
+        image_present: bool = False,
         suggested_questions: list[str] | None = None,
     ) -> str:
         # Check if user is asking for advice/management rather than diagnosis
@@ -475,6 +432,13 @@ class MedGemmaChatService:
 
         # Identify previously asked questions to avoid repetition
         asked_questions = self._extract_asked_questions_from_history(memory_summary) if memory_summary else set()
+        dialogue_state = dialogue_state or {}
+        known_location = str(dialogue_state.get("known_location", "") or "")
+        known_descriptors = list(dialogue_state.get("known_descriptors", []) or [])
+        known_symptoms = list(dialogue_state.get("known_symptoms", []) or [])
+        known_effects = list(dialogue_state.get("known_effects", []) or [])
+        image_present = bool(image_present or dialogue_state.get("image_present", False))
+        urgent_reasons = list(dialogue_state.get("urgent_reasons", []) or [])
 
         prompt = (
             "You are a helpful, empathetic dermatology assistant in a clinic setting.\n\n"
@@ -484,6 +448,8 @@ class MedGemmaChatService:
             "3. Ask ONE follow-up question at a time to gather missing diagnostic information.\n"
             "4. Use natural, empathetic language. Avoid robotic templates.\n"
             "5. Respond in ENGLISH only.\n\n"
+            "6. If an image has already been uploaded, acknowledge it and do NOT ask the user to upload a photo again.\n"
+            "7. If location/shape/symptom/effect is already known, do not ask about it again.\n"
             "RESPONSE STRUCTURE:\n"
             "Start with your conversational response addressing the current message.\n"
             "If more information is needed, ask a SINGLE focused follow-up question.\n"
@@ -492,16 +458,24 @@ class MedGemmaChatService:
             f"{recent_context}"
             f"Current user message: {user_message}\n"
             f"Previously discussed topics (avoid re-asking): {asked_questions or 'none yet'}\n\n"
+            f"Known dialogue state: location={known_location or 'unknown'}, descriptors={known_descriptors or []}, symptoms={known_symptoms or []}, effects={known_effects or []}, image_present={image_present}, urgent_reasons={urgent_reasons or []}\n\n"
             f"Available diagnostic reasoning:\n"
             f"  Top candidate: {top_candidate or 'None'}\n"
             f"  Other candidates: {candidates[:2] if candidates else 'None'}\n"
             f"  Supporting evidence: {len(evidence or [])} items\n"
             f"  Visual features: {visual_features.get('visual_atoms', []) if visual_features else 'None'}\n\n"
+            f"Image acknowledgement rule: {'acknowledge the uploaded photo and use visual features' if image_present else 'no photo has been uploaded'}\n"
         )
 
         try:
             raw = self._run_text(prompt)
-            result = self._clean_answer(raw, top_candidate, candidates=candidates, evidence=evidence)
+            result = self._clean_answer(
+                raw,
+                top_candidate,
+                candidates=candidates,
+                evidence=evidence,
+                image_present=image_present,
+            )
             # If we got empty or invalid output, and no candidates, try direct diagnosis
             if (not result or "could not confidently" in result.lower()) and not top_candidate and not candidates:
                 return self._direct_medgemma_diagnosis(user_message, visual_features)
@@ -515,7 +489,7 @@ class MedGemmaChatService:
             # Fallback to deterministic if we have a top candidate
             if top_candidate:
                 logger.info("Returning deterministic answer based on top candidate")
-                return self._deterministic_candidate_answer(top_candidate, evidence)
+                return self._deterministic_candidate_answer(top_candidate, evidence, image_present=image_present)
             # Last resort
             logger.error("No fallback available, returning generic message")
             return (

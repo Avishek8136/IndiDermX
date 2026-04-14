@@ -4,14 +4,13 @@ import json
 import re
 from typing import Any
 
-from bytez import Bytez
-
 from hyperderm.core.config import settings
+from hyperderm.services.model_clients import run_text_with_fallback
 
 
 def _parse_json_object(output: Any) -> dict[str, Any]:
     if isinstance(output, dict):
-        # Bytez can return a chat wrapper: {role, content}. Parse JSON from content.
+        # Chat completions can return a wrapper: {role, content}. Parse JSON from content.
         content = output.get("content")
         if isinstance(content, str):
             return _parse_json_object(content)
@@ -64,6 +63,9 @@ def _normalize_tokens(values: list[Any]) -> list[str]:
 
     def _canonical_atom(raw: str) -> str:
         token = raw.strip().lower()
+        # Keep only ascii letters/spaces to avoid noisy multilingual/free-form generations.
+        token = token.encode("ascii", "ignore").decode("ascii")
+        token = re.sub(r"[^a-z\s\-]", " ", token)
         token = re.sub(r"\s+", " ", token)
         if token.endswith("ies") and len(token) > 4:
             token = token[:-3] + "y"
@@ -79,6 +81,11 @@ def _normalize_tokens(values: list[Any]) -> list[str]:
         for part in parts:
             token = _canonical_atom(part)
             if not token or token in noise_tokens or token in seen:
+                continue
+            # Skip very long/free-form fragments, keep compact reusable node labels.
+            if len(token) < 3 or len(token) > 28:
+                continue
+            if " " in token and len(token.split()) > 3:
                 continue
             seen.add(token)
             output.append(token)
@@ -179,10 +186,19 @@ def _fallback_from_disease_name(disease_name: str) -> dict[str, list[str]]:
 
 class SymptomEffectService:
     def __init__(self) -> None:
-        self._sdk = Bytez(settings.bytez_api_key)
-        self._model = self._sdk.model(settings.bytez_model)
+        self._model_id = settings.bytez_model
+        self._timeout_seconds = int(settings.bytez_timeout_seconds)
 
-    def generate(self, disease_name: str, context_text: str) -> dict[str, Any]:
+    def _run_text(self, prompt: str, provider_mode: str = "bytez_only") -> tuple[str, bool, str, str | None]:
+        text, source, error = run_text_with_fallback(
+            prompt,
+            timeout_seconds=self._timeout_seconds,
+            temperature=0.2,
+            validator=lambda output: bool(output.strip()),
+        )
+        return text, bool(text.strip()), source, error
+
+    def generate(self, disease_name: str, context_text: str, provider_mode: str = "bytez_only") -> dict[str, Any]:
         prompt_with_context = (
             "Extract concise dermatology symptom and effect tokens for graph nodes. "
             "Return only JSON with keys: symptoms (array of short strings), effects (array of short strings). "
@@ -210,15 +226,11 @@ class SymptomEffectService:
         fallback_disease = _fallback_from_disease_name(disease_name)
 
         def _call_model(prompt: str) -> dict[str, Any]:
-            try:
-                result = self._model.run([{"role": "user", "content": prompt}])
-            except Exception:  # noqa: BLE001
-                return {"symptoms": [], "effects": [], "ok": False}
+            output_text, ok, source, error = self._run_text(prompt, provider_mode=provider_mode)
+            if not ok:
+                return {"symptoms": [], "effects": [], "ok": False, "source": source, "error": error}
 
-            if result.error:
-                return {"symptoms": [], "effects": [], "ok": False}
-
-            parsed = _parse_json_object(result.output)
+            parsed = _parse_json_object(output_text)
             symptoms = parsed.get("symptoms", [])
             effects = parsed.get("effects", [])
             if not isinstance(symptoms, list):
@@ -229,6 +241,7 @@ class SymptomEffectService:
                 "symptoms": _normalize_tokens(symptoms),
                 "effects": _normalize_tokens(effects),
                 "ok": True,
+                "source": source,
             }
 
         primary = _call_model(prompt_with_context)
@@ -236,9 +249,9 @@ class SymptomEffectService:
             return {
                 "symptoms": primary["symptoms"],
                 "effects": primary["effects"],
-                "generation_mode": "bytez_context",
-                "bytez_attempted": True,
-                "bytez_success": True,
+                "generation_mode": f"{primary.get('source', 'bytez')}_context",
+                "bytez_attempted": primary.get("source") == "bytez",
+                "bytez_success": primary.get("source") == "bytez",
                 "bytez_attempted_modes": ["context"],
             }
 
@@ -247,9 +260,9 @@ class SymptomEffectService:
             return {
                 "symptoms": secondary["symptoms"],
                 "effects": secondary["effects"],
-                "generation_mode": "bytez_disease_only",
-                "bytez_attempted": True,
-                "bytez_success": True,
+                "generation_mode": f"{secondary.get('source', 'bytez')}_disease_only",
+                "bytez_attempted": secondary.get("source") == "bytez",
+                "bytez_success": secondary.get("source") == "bytez",
                 "bytez_attempted_modes": ["context", "disease_only"],
             }
 
@@ -258,9 +271,9 @@ class SymptomEffectService:
             return {
                 "symptoms": strict["symptoms"],
                 "effects": strict["effects"],
-                "generation_mode": "bytez_disease_strict",
-                "bytez_attempted": True,
-                "bytez_success": True,
+                "generation_mode": f"{strict.get('source', 'bytez')}_disease_strict",
+                "bytez_attempted": strict.get("source") == "bytez",
+                "bytez_success": strict.get("source") == "bytez",
                 "bytez_attempted_modes": ["context", "disease_only", "disease_strict"],
             }
 
@@ -268,14 +281,14 @@ class SymptomEffectService:
             return {
                 **fallback_context,
                 "generation_mode": "context_fallback",
-                "bytez_attempted": True,
+                "bytez_attempted": False,
                 "bytez_success": False,
                 "bytez_attempted_modes": ["context", "disease_only", "disease_strict"],
             }
         return {
             **fallback_disease,
             "generation_mode": "disease_fallback",
-            "bytez_attempted": True,
+            "bytez_attempted": False,
             "bytez_success": False,
             "bytez_attempted_modes": ["context", "disease_only", "disease_strict"],
         }
